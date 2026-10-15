@@ -1,11 +1,11 @@
-# barbell demux for custom CDI amplicon libraries (ONT)
+## barbell demux for custom CDI amplicon libraries (ONT)
 
 Demultiplexes combinatorial dual-index (CDI) amplicon libraries sequenced on Oxford Nanopore with
 [barbell](https://github.com/rickbeeloo/barbell). Each amplicon carries a utag + primer at both ends; the **pair** of utags
 (e.g. a 32 x 12 grid = 384 wells) identifies the sample. Works for NBD (native barcoding) and LSK (ligation) libraries and
 any primer pair (default 16S 27F / 1492R).
 
-## Quick start
+### Quick start
 
 **Requirements:** Python >= 3.8 (stdlib only) and `barbell` on your PATH
 (`RUSTFLAGS="-C target-cpu=native" cargo install barbell` or `conda install -c bioconda barbell`). Optional, to call it as `barbell-cdi`:
@@ -28,19 +28,19 @@ barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet
 `-r` takes files, globs (quote them so the script expands them; `**` recurses) or directories (searched recursively for
 `.fastq/.fq[.gz]`). `-h` on any subcommand lists its options and the input file formats.
 
-## Choosing the command and context
+### Choosing the command and context
 
 ```
 5'-[ONT context][utag-fwd][forward primer] ...insert... [reverse primer][utag-rev][ONT context]-3'
 ```
 
 The "context" is the constant sequence directly 5' of the utag, which barbell uses as part of the flank. `demux` defaults to
-`bare`; for untrimmed NBD or LSK reads pass `-c nbd` or `-c lsk`:
+`bare`; for untrimmed NBD (reads in `fastq_pass/barcode01`) pass `-c nbd --ont-barcode NB01`, for LSK reads pass `-c lsk`:
 
 | `-c` | Use for | Sequence 5' of the utag |
 |---|---|---|
-| `nbd` | Native Barcoding kits (SQK-NBD114) | `CAGCACCT` (after every NB barcode); with `--ont-barcode NB07`: `ATTGCTAAGGTTAA` + NB07 + `CAGCACCT` |
-| `lsk` | Ligation kit (SQK-LSK114, no ONT barcode) | `CTTCGTTCAGTTACGTATTGCT` (end of the Ligation Adapter) |
+| `nbd` | SQK-NBD114 | `CAGCACCT` (after every NB barcode); with `--ont-barcode NB07`: `ATTGCTAAGGTTAA` + NB07 + `CAGCACCT` |
+| `lsk` | SQK-LSK114, no ONT barcode | `CTTCGTTCAGTTACGTATTGCT` (end of the Ligation Adapter) |
 | `bare` (default) | Reads whose ONT adapter/barcode is already trimmed (`twopass` uses this in pass 2) | nothing |
 
 * **`demux`**: utags are the only sample identifier (no ONT barcodes, or one per library).
@@ -52,13 +52,13 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
 
 Other subcommands: `queries` (write the query FASTAs only), `tagqc` (tag-set statistics), `context`.
 
-## Input files
+### Input files
 
 | Option | Default | Format | Example row |
 |---|---|---|---|
 | `--tags` | `data/utags-sequence.csv` | no header: `tag ID,sequence` | `U013,CAACAGTAG` |
 | `--plates` | `data/utags-platemap.csv` | `plate,well,utag-fwd,utag-rev` | `1,A1,U013,U001` |
-| `--samplesheet` | none | `sample,plate,well[,ont-barcode]`, CSV or `.xlsx` | `Soil_A,1,A1` |
+| `--samplesheet` | none | `sample,plate,well[,ont-barcode]`, csv or `.xlsx` | `Soil_A,1,A1` |
 
 You only write the sample sheet: which sample is in which well. The plate map (found next to the script) turns wells into tags.
 
@@ -89,7 +89,7 @@ Water_2,1,H12
   as unexpected instead of being forced onto the most similar listed tag. The script prints how many decoys it added, and warns
   if the plate map is missing. `--no-decoys` turns this off (more mis-assignments).
 
-## Output
+### Output
 
 Results and the script's own files are at the top; everything barbell writes is in `barbell/`.
 
@@ -129,7 +129,7 @@ twopass_out/
     pass2_utag/<bin>/           the demux run of each bin (its own log, summaries and barbell/ folder)
 ```
 
-## Troubleshooting: few reads assigned
+### Troubleshooting: few reads assigned
 
 `demux` prints what was found per read (from `barbell/inspect.txt`):
 
@@ -155,18 +155,15 @@ twopass_out/
 * Tuning: `--flank-max-errors N` (relax if reads are missed), `--min-score-diff X` (raise, e.g. 0.2, for fewer wrong-well calls),
   `--max-offset 250` (max distance of the utag from the read end).
 
-## Reference
-
-**Workflow.** `demux` runs barbell `annotate` (find utag + flank at both ends, both strands) -> `inspect` (pattern summary; the
+### Reference
+**Barbell paper:** https://doi.org/10.1093/bioinformatics/btag349  
+**Workflow:** `demux` runs barbell `annotate` (find utag + flank at both ends, both strands) -> `inspect` (pattern summary; the
 two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filter` (keep reads with a tag at both ends) ->
 `trim` (cut tags and primers, one file per tag pair) -> rename tag pairs to samples. It adapts to both the release barbell
 (comma-separated `-q`/`-b`, single input) and newer builds, decompresses `.gz` input first, and raises `ulimit -n` for `trim`
 (use `ulimit -n 65535` if you run barbell by hand).
 
-**Query FASTAs.** One per end; each entry is the full oligo `context + utag + primer`, 5'->3'. barbell treats the longest
-prefix/suffix shared by all entries as flank, so only the tag may differ. The right FASTA is in oligo orientation, giving
-`Rtag[rc]` on forward reads as in barbell's filter examples. Ready-made files for the default primers are in `data/fasta/`;
-regenerate with `queries --primer-f ... --primer-r ...`.
+**Query FASTAs.** One per end; each entry is the full oligo `context + utag + primer`, 5'->3'. Ready-made files for the default primers are in `data/fasta/`; regenerate with `queries --primer-f ... --primer-r ...`.
 
 **This tag set.**
 * Rev tags `U001`-`U012` all start with `A`, so barbell folds that base into the flank and compares 8 nt instead of 9 (printed; works).
@@ -179,9 +176,9 @@ regenerate with `queries --primer-f ... --primer-r ...`.
 (CHTD_500_v1_revAV_24July2026). You can check unknown reads with `context`.
 
 
-## Repository
+### Repository
 
-| File | What |
+| File | Description |
 |---|---|
 | `barbell-cdi.py` | The tool (`demux`, `twopass`, `context`, `queries`, `tagqc`) |
 | `data/utags-sequence.csv`, `data/utags-platemap.csv` | Default tags and plate map |
