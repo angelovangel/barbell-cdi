@@ -50,7 +50,7 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
   reads carry the barcode context and utag at the read start only, so no tag pair can be formed (the downstream tag is low quality/trimmed).
 * Unsure what is really upstream of your utags? Run `context` (see Troubleshooting) and pass its suggestion as `--prefix`.
 
-Other subcommands: `queries` (write the query FASTAs only), `tagqc` (tag-set statistics), `context`.
+Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags, plate map and sample sheet), `context`.
 
 ### Input files
 
@@ -63,7 +63,8 @@ Other subcommands: `queries` (write the query FASTAs only), `tagqc` (tag-set sta
 You only write the sample sheet: which sample is in which well. The plate map (found next to the script) turns wells into tags.
 
 **Tags** (`--tags`): 96 tags of 9 nt (`U001`-`U096`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
-the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check a tag set with `tagqc`.
+the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`: tag edit distances, the plate map's layout per plate (which tags run along rows / columns),
+duplicate wells, missing tag sequences, and with `--samplesheet` the samples per plate, ONT bins and decoys.
 
 **Plate map** (`--plates`): the full library design, 4 plates x 96 wells. Column 1-12 = rev tags `U001`-`U012`; rows A-H = fwd tags
 `U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U023` + `U007`). Without a sample sheet the outputs are named `Plate1-A1.fastq` etc.
@@ -183,7 +184,7 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | `barbell-cdi.py` | The tool (`demux`, `twopass`, `context`, `queries`, `tagqc`) |
 | `data/utags-sequence.csv`, `data/utags-platemap.csv` | Default tags and plate map |
 | `data/samplesheet-example.csv`, `data/samplesheet-example-twopass.csv` | Example sample sheets (the second with `ont-barcode`) |
-| `data/utags-pacbio-sequence.csv` | A different tag set (42 x 10 nt, `U001`-`U042`); not used by default, does not cover plate 4 |
+| `data/utags-10bp-sequence.csv`, `data/utags-10bp-platemap.csv` | An alternative 10 nt tag set (`U001`-`U044`) and its plate map (rows = rev, columns = fwd tags); use with `--tags` and `--plates` |
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
 | `plate-heatmap.py` | HTML heatmap of reads per well: `python3 plate-heatmap.py demux_out/summary.tsv -o plates.html` (samples are placed by the `plate`/`well` columns, so custom names need no extra file) |

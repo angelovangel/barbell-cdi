@@ -346,6 +346,8 @@ def read_table(path, sheet=None):
     elif path.lower().endswith(".xls"):
         sys.exit(f"{path}: old .xls is not supported; save as .xlsx or .csv")
     else:
+        if not os.path.exists(path):
+            sys.exit(f"{path}: file not found")
         with open(path, newline="", encoding="utf-8-sig") as fh:
             raw = list(csv.reader(fh))
     raw = [r for r in raw if any(c.strip() for c in r)]
@@ -1160,7 +1162,7 @@ def cmd_queries(a):
 def cmd_tagqc(a):
     tags, plates = read_tags(a.tags), load_layout(a)
     fwd, rev = used_tags(plates, tags)
-    print_step("tag set check")
+    print_step(f"tag set: {rel(a.tags)}")
     rows = []
     for nm, ids in (("fwd", fwd), ("rev", rev)):
         d = sorted((edit_distance(tags[x], tags[y]), x, y) for x, y in itertools.combinations(ids, 2))
@@ -1170,13 +1172,106 @@ def cmd_tagqc(a):
         rows.append([style(nm, "cyan"), fmt_int(len(ids)), style(str(d[0][0]), "green" if d[0][0] >= 3 else "yellow" if d[0][0] == 2 else "red"),
                      f"{n_min} (e.g. {d[0][1]}/{d[0][2]})", f"{shared[0]} / {shared[1]}"])
     print_table(["set", "tags", "min edit dist", "pairs at min", "shared 5' / 3' nt"], rows, "<>>>>", indent=4)
-    combos = {(r['utag-fwd'], r['utag-rev']) for r in plates}
-    print()
-    print_kv([("samples", fmt_int(len(plates))), ("unique tag pairs", fmt_int(len(combos))),
-              ("grid", f"{len(fwd)} x {len(rev)} = {len(fwd) * len(rev)}")])
     if any(len(os.path.commonprefix([tags[i] for i in ids])) for ids in (fwd, rev)):
         print()
         print_note("tags share a leading base: barbell folds it into the flank (the barcode region is 1 nt shorter)")
+    plate_map_report(a, tags, plates)
+
+
+def id_ranges(ids):
+    """['U001','U002','U003','U007'] -> 'U001-U003, U007'"""
+    runs = []
+    for i in sorted(set(ids), key=lambda x: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", x)]):
+        m = re.fullmatch(r"(.*?)(\d+)", i)
+        if runs and m and runs[-1][0] == m.group(1) and runs[-1][1] + 1 == int(m.group(2)):
+            runs[-1][1], runs[-1][3] = int(m.group(2)), i
+        else:
+            runs.append([m.group(1) if m else None, int(m.group(2)) if m else -9, i, i])
+    return ", ".join(r[2] if r[2] == r[3] else f"{r[2]}-{r[3]}" for r in runs)
+
+
+def plate_map_report(a, tags, layout):
+    """tagqc: layout of the plate map (which tag runs along rows / columns), consistency checks, sample sheet coverage."""
+    print_step(f"plate map: {rel(a.plates)}")
+    if not os.path.exists(a.plates):
+        print_note("plate map not found (--plates)")
+        return
+    design = read_plates(a.plates)
+    well_rc = lambda w: (w[0], int(w[1:]))
+    by_plate = defaultdict(list)
+    for r in design:
+        by_plate[r["plate"]].append(r)
+    rows = []
+    for plate in sorted(by_plate, key=lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]):
+        prs = [r for r in by_plate[plate] if r["well"]]
+        letters = sorted({well_rc(r["well"])[0] for r in prs})
+        cols = sorted({well_rc(r["well"])[1] for r in prs})
+
+        def along(axis):                    # which tag is constant along each row (axis 0) / column (axis 1)
+            for side in ("utag-fwd", "utag-rev"):
+                g = defaultdict(set)
+                for r in prs:
+                    g[well_rc(r["well"])[axis]].add(r[side])
+                if all(len(v) == 1 for v in g.values()):
+                    return f"{side[5:]} {id_ranges(next(iter(v)) for v in g.values())}"
+            return style("mixed", "yellow")
+        rows.append([style(plate or "?", "cyan"), fmt_int(len(prs)),
+                     f"{letters[0]}-{letters[-1]}" if letters else "", f"{cols[0]}-{cols[-1]}" if cols else "",
+                     along(0), along(1)])
+    print_table(["plate", "wells", "rows", "cols", "per row", "per column"], rows, "<>>><<", indent=4)
+
+    d_fwd = {r["utag-fwd"] for r in design}
+    d_rev = {r["utag-rev"] for r in design}
+    pairs = {(r["utag-fwd"], r["utag-rev"]) for r in design}
+    print()
+    print_kv([("plates", fmt_int(len(by_plate))), ("wells", fmt_int(len(design))),
+              ("fwd tags", f"{len(d_fwd)}  ({id_ranges(d_fwd)})"), ("rev tags", f"{len(d_rev)}  ({id_ranges(d_rev)})"),
+              ("tag pairs", f"{fmt_int(len(pairs))} of {fmt_int(len(d_fwd) * len(d_rev))} possible fwd x rev combinations")])
+    issues = []
+    seen = Counter((r["plate"], r["well"]) for r in design if r["well"])
+    dup = [f"{p}-{w}" for (p, w), n in seen.items() if n > 1]
+    if dup:
+        issues.append(f"wells listed more than once: {', '.join(dup[:10])}")
+    if d_fwd & d_rev:
+        issues.append(f"tags used as both fwd and rev: {id_ranges(d_fwd & d_rev)}")
+    missing = (d_fwd | d_rev) - set(tags)
+    if missing:
+        issues.append(f"tags not in {os.path.basename(a.tags)}: {id_ranges(missing)}")
+    print()
+    for msg in issues:
+        print_note(msg)
+    if not issues:
+        print_info(style(SYM["ok"], "green") + " no duplicate wells; fwd and rev tags are separate sets; all tags have a sequence")
+    if len(pairs) == len(d_fwd) * len(d_rev):
+        print_info("the grid is complete: every fwd x rev combination is a well, so chimeras land in a wrong well "
+                   "(with a sample sheet, unlisted wells are reported as unexpected)")
+    else:
+        print_info(f"{fmt_int(len(d_fwd) * len(d_rev) - len(pairs))} fwd x rev combinations are not wells: "
+                   "reads with them are reported as unexpected")
+    unused = set(tags) - d_fwd - d_rev
+    if unused:
+        print_info(f"{len(unused)} tags in {os.path.basename(a.tags)} are not in the plate map: {id_ranges(unused)}")
+
+    if getattr(a, "samplesheet", None):
+        print_step(f"sample sheet: {rel(a.samplesheet)}")
+        rows = []
+        for plate in sorted(by_plate, key=lambda p: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", p)]):
+            n = sum(1 for r in layout if r["plate"] == plate)
+            if n:
+                rows.append([style(plate, "cyan"), fmt_int(n), fmt_int(len(by_plate[plate]))])
+        off = sum(1 for r in layout if not r["well"])
+        if off:
+            rows.append([style("not in plate map", "yellow"), fmt_int(off), ""])
+        print_table(["plate", "samples", "wells in plate map"], rows, "<>>", indent=4)
+        bins = Counter(r["ont"] for r in layout if r["ont"])
+        print()
+        kv = [("samples", fmt_int(len(layout)))]
+        if bins:
+            kv.append(("ONT bins", ", ".join(f"{b} ({n})" for b, n in sorted(bins.items()))))
+        used = {(r["utag-fwd"], r["utag-rev"]) for r in layout}
+        kv.append(("decoys", f"{len(d_fwd - {r['utag-fwd'] for r in layout})} fwd + {len(d_rev - {r['utag-rev'] for r in layout})} rev tags; "
+                             f"{fmt_int(len(pairs - used))} plate-map wells not in the sheet are reported as unexpected"))
+        print_kv(kv)
 
 
 class Tee:
@@ -1281,7 +1376,7 @@ def main():
     cx.add_argument("--min-support", type=float, default=60, help="%% of hits needed per base for the suggested prefix (default 60)")
     cx.set_defaults(fn=cmd_context)
 
-    t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="tag-set statistics (edit distances, shared flanks)")
+    t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="check the tag set, plate map layout and sample sheet coverage")
     common(t)
     t.set_defaults(fn=cmd_tagqc)
 
