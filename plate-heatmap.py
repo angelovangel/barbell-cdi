@@ -1,0 +1,539 @@
+#!/usr/bin/env python3
+"""
+plate-heatmap.py - plate heatmap of read counts per well, from the summary.tsv written by barbell-cdi.py.
+
+    plate-heatmap.py demux_out/summary.tsv -o plates.html
+    plate-heatmap.py twopass_out/summary.tsv --scale linear --per-plate
+    plate-heatmap.py old_summary.tsv --map plate_map.csv            # summaries without plate/well columns
+
+Writes ONE self-contained HTML file (no internet, no dependencies) that shows every plate as a well grid coloured
+by read count. In the page you can paint wells into two groups (A and B) and read the total reads per group in the
+sidebar on the right.
+
+Input (tab or comma separated; extra columns are ignored):
+    sample        e.g. Plate1-A1 (plate and well are read from names like Plate1-A1, P2_B12, A1)
+    reads         read count
+    plate, well   where the sample sits (written by barbell-cdi.py, also for custom sample names)
+    ont_barcode   optional (twopass): every ONT bin gets its own plates
+    utag_fwd, utag_rev   optional, shown in the tooltip
+
+Without plate/well columns, samples are placed by their name (Plate1-A1, P2_B12, A1) or with --map, a CSV/TSV with
+columns `sample,well` and optionally `plate` (well like A1 or A01). Anything still unplaced is shown in an
+"Unplaced samples" panel, where it can be selected like any other well.
+
+Python >= 3.8, standard library only.
+"""
+import argparse
+import csv
+import json
+import os
+import re
+import statistics
+import sys
+
+WELL_RE = re.compile(r"^(?:(?P<plate>.+?)[-_ :/.])?(?P<row>[A-Pa-p])(?P<col>\d{1,2})$")
+ALIASES = {
+    "sample": ("sample", "plate_well", "plate-well", "name", "well_id"),
+    "reads": ("reads", "read_count", "count", "n_reads"),
+    "ont": ("ont_barcode", "ont-barcode", "ont", "bin"),
+    "fwd": ("utag_fwd", "utag-fwd", "fwd"),
+    "rev": ("utag_rev", "utag-rev", "rev"),
+}
+USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+
+def paint(text, code):
+    return f"\033[{code}m{text}\033[0m" if USE_COLOR else str(text)
+
+
+def natural_key(s):
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", str(s))]
+
+
+def read_table(path):
+    with open(path, newline="", encoding="utf-8-sig") as fh:
+        head = fh.readline()
+        fh.seek(0)
+        delim = "\t" if "\t" in head else ","
+        rows = [{(k or "").strip().lower(): (v or "").strip() for k, v in r.items()}
+                for r in csv.DictReader(fh, delimiter=delim)]
+    if not rows:
+        sys.exit(f"{path}: empty")
+    return rows
+
+
+def pick(row, field):
+    for k in ALIASES[field]:
+        if k in row:
+            return row[k]
+    return None
+
+
+def parse_well(text):
+    m = re.fullmatch(r"([A-Pa-p])\s*0*(\d{1,2})", str(text).strip())
+    if not m or int(m.group(2)) < 1 or int(m.group(2)) > 24:
+        return None
+    return ord(m.group(1).upper()) - 65, int(m.group(2)) - 1
+
+
+def load_map(path):
+    out = {}
+    for r in read_table(path):
+        s, w = pick(r, "sample"), r.get("well") or r.get("position")
+        pos = parse_well(w) if w else None
+        if not s or pos is None:
+            sys.exit(f"{path}: need columns sample,well (e.g. A1) and optionally plate; bad row: {r}")
+        out[s] = (r.get("plate", ""), pos)
+    return out
+
+
+def build(rows, sample_map):
+    wells, unplaced_names = [], 0
+    for r in rows:
+        sample = pick(r, "sample")
+        reads = pick(r, "reads")
+        if sample is None or reads is None:
+            sys.exit("summary needs a `sample` and a `reads` column (found: %s)" % ", ".join(rows[0]))
+        try:
+            reads = int(float(reads))
+        except ValueError:
+            sys.exit(f"bad read count for {sample}: {reads!r}")
+        ont = pick(r, "ont") or ""
+        plate, pos = None, None
+        if sample in sample_map:
+            plate, pos = sample_map[sample]
+        elif r.get("well") and parse_well(r["well"]):        # summary.tsv from barbell-cdi.py has plate,well
+            plate, pos = r.get("plate", ""), parse_well(r["well"])
+        else:
+            m = WELL_RE.match(sample)
+            if m and int(m.group("col")) <= 24 and 1 <= int(m.group("col")):
+                plate, pos = m.group("plate") or "", (ord(m.group("row").upper()) - 65, int(m.group("col")) - 1)
+        if pos is None:
+            unplaced_names += 1
+        wells.append(dict(id=f"{ont}|{sample}", sample=sample, ont=ont, plate=plate, pos=pos, reads=reads,
+                          fwd=pick(r, "fwd") or "", rev=pick(r, "rev") or ""))
+    ids = [w["id"] for w in wells]
+    if len(set(ids)) != len(ids):
+        sys.exit("duplicate sample names in the summary (within one ONT bin)")
+
+    # panels: one per (ont bin, plate); unplaced samples of a bin share a list panel
+    keys = sorted({(w["ont"], w["plate"] if w["pos"] is not None else None) for w in wells},
+                  key=lambda k: (natural_key(k[0]), k[1] is None, natural_key(k[1] or "")))
+    panels = []
+    for i, (ont, plate) in enumerate(keys):
+        members = [w for w in wells if w["ont"] == ont and (w["plate"] if w["pos"] is not None else None) == plate]
+        if plate is None:
+            title = " \u00b7 ".join(x for x in (ont, "Unplaced samples") if x)
+            panels.append(dict(i=i, kind="list", title=title, rows=0, cols=0))
+        else:
+            mr = max(w["pos"][0] for w in members)
+            mc = max(w["pos"][1] for w in members)
+            rows_n = 8 if mr < 8 else 16
+            cols_n = 12 if mc < 12 else 24
+            title = " \u00b7 ".join(x for x in (ont, plate) if x) or "Plate"
+            panels.append(dict(i=i, kind="plate", title=title, rows=rows_n, cols=cols_n))
+        for w in members:
+            w["panel"] = i
+    out = []
+    for w in wells:
+        d = dict(id=w["id"], sample=w["sample"], ont=w["ont"], reads=w["reads"], fwd=w["fwd"], rev=w["rev"],
+                 panel=w["panel"])
+        if w["pos"] is not None:
+            d.update(row=w["pos"][0], col=w["pos"][1], well=f"{chr(65 + w['pos'][0])}{w['pos'][1] + 1}")
+        out.append(d)
+    return out, panels, unplaced_names
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Plate heatmap (HTML) of read counts per well from barbell-cdi summary.tsv")
+    ap.add_argument("summary", help="summary.tsv from barbell-cdi.py demux / twopass (tab or comma separated)")
+    ap.add_argument("-o", "--output", help="HTML file to write (default: plates.html next to the summary)")
+    ap.add_argument("--title", help="page title (default: the summary's folder name)")
+    ap.add_argument("--map", help="CSV/TSV with columns sample,well[,plate]; only needed for summaries without plate/well columns")
+    ap.add_argument("--scale", choices=["log", "sqrt", "linear"], default="log", help="initial colour scale (default log)")
+    ap.add_argument("--per-plate", action="store_true", help="start with the colour range set per plate instead of globally")
+    ap.add_argument("--names", nargs=2, metavar=("A", "B"), default=["Group A", "Group B"], help="initial group names")
+    a = ap.parse_args()
+
+    rows = read_table(a.summary)
+    wells, panels, unplaced = build(rows, load_map(a.map) if a.map else {})
+    out = a.output or os.path.join(os.path.dirname(os.path.abspath(a.summary)), "plates.html")
+    title = a.title or (os.path.basename(os.path.dirname(os.path.abspath(a.summary))) or "plates") + " - reads per well"
+    data = dict(title=title, wells=wells, panels=panels, scale=a.scale, perPlate=a.per_plate, names=a.names)
+    payload = json.dumps(data, separators=(",", ":")).replace("<", "\\u003c")
+    html = TEMPLATE.replace("__TITLE__", title.replace("<", "&lt;")).replace("__DATA__", payload)
+    with open(out, "w", encoding="utf-8") as fh:
+        fh.write(html)
+
+    total = sum(w["reads"] for w in wells)
+    with_reads = sum(1 for w in wells if w["reads"] > 0)
+    plates = sum(1 for p in panels if p["kind"] == "plate")
+    lab = lambda s: paint(f"{s:<20}", "36")
+    print(f"{paint('plate heatmap', '1;36')}  {paint(a.summary, '2')}")
+    print(f"  {lab('plates')}{plates}" + (f"   (+ {unplaced} unplaced samples)" if unplaced else ""))
+    print(f"  {lab('wells with reads')}{with_reads:,} / {len(wells):,}")
+    print(f"  {lab('total reads')}{total:,}")
+    if unplaced:
+        print(f"  {paint('!', '1;33')} {unplaced} sample names are not plate-well names: they have no plate/well column; pass --map sample_wells.csv to place them")
+    print(f"  {lab('written')}{out}")
+
+
+TEMPLATE = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root{color-scheme:light;--bg:#f6f7f9;--panel:#ffffff;--panel2:#f1f3f6;--ink:#1c2230;--dim:#6b7383;--line:#dde1e7;--A:#1f6feb;--B:#7b3fe4;--accent:#1c2230;--zero:#eceef2}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--bg);color:var(--ink);font:13px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;user-select:none;-webkit-user-select:none}
+#app{display:grid;grid-template-columns:minmax(0,1fr) 350px;grid-template-rows:auto minmax(0,1fr);grid-template-areas:"head side" "main side";height:100vh}
+header{grid-area:head;padding:14px 20px 10px;border-bottom:1px solid var(--line)}
+header h1{margin:0 0 2px;font-size:17px;font-weight:650}
+.sub{color:var(--dim);font-size:12px}
+.controls{display:flex;flex-wrap:wrap;gap:14px;align-items:center;margin-top:10px}
+.controls label{display:flex;gap:6px;align-items:center;color:var(--dim)}
+select,input,button{font:inherit;color:var(--ink);background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+button{cursor:pointer}button:hover{border-color:#a9b0bc}
+.legend{display:flex;align-items:center;gap:8px;margin-left:auto;color:var(--dim)}
+.legend .bar{width:220px;height:12px;border-radius:6px;border:1px solid var(--line)}
+.legend .zero{width:12px;height:12px;border-radius:2px;background:var(--zero);border:1px solid var(--line)}
+main{grid-area:main;overflow:auto;padding:16px 20px 40px}
+.panels{display:grid;grid-template-columns:repeat(auto-fit,minmax(480px,1fr));gap:16px;align-items:start}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px 14px;width:100%;justify-self:start;min-width:0}
+.panel.p96{max-width:800px}.panel.p384{grid-column:1/-1;max-width:1400px}.panel.plist{grid-column:1/-1}
+.phead{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:baseline;margin-bottom:8px}
+.phead b{font-size:14px}.pstats{color:var(--dim);font-size:12px}.pbtns{margin-left:auto;display:flex;gap:6px}
+.pbtns button{padding:2px 8px;font-size:12px;color:var(--dim)}
+.grid{display:grid;grid-template-columns:1.7em repeat(var(--cols),minmax(0,1fr));gap:3px;container-type:inline-size}
+.hc,.hr{display:flex;align-items:center;justify-content:center;color:var(--dim);font-size:11px;cursor:pointer;border-radius:4px;min-height:1.4em}
+.hc:hover,.hr:hover{background:var(--panel2);color:var(--ink)}
+.well{position:relative;aspect-ratio:1;border-radius:2px;display:flex;align-items:center;justify-content:center;text-align:center;
+  font-size:clamp(6.5px,calc(100cqw / (var(--cols) + 1.7) * .27),15px);font-weight:600;cursor:pointer;line-height:1;overflow:visible;
+  font-variant-numeric:tabular-nums;transition:box-shadow .08s}
+.well.empty{background:transparent;border:1px dashed var(--line);cursor:default}
+.well:not(.empty):hover{box-shadow:0 0 0 2px #1c223088}
+.well.selA{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--A)}
+.well.selB{box-shadow:0 0 0 2px #fff,0 0 0 4px var(--B)}
+.well[data-g]::after{content:attr(data-g);position:absolute;top:-5px;right:-5px;min-width:13px;height:13px;border-radius:7px;font-size:9px;
+  line-height:13px;text-align:center;color:#fff;font-weight:800;z-index:1}
+.well.selA::after{background:var(--A)}.well.selB::after{background:var(--B)}
+.tiles{display:flex;flex-wrap:wrap;gap:6px}
+.well.tile{aspect-ratio:auto;border-radius:9px;padding:6px 10px;flex-direction:column;gap:2px;font-size:12px;min-width:92px}
+.tile .tn{font-weight:500;opacity:.85;font-size:11px;word-break:break-all}.tile .tv{font-weight:700}
+aside{grid-area:side;border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:14px 16px 30px}
+aside h2{margin:14px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:600}
+aside h2:first-child{margin-top:0}
+.modes{display:flex;gap:6px}
+.modes button{flex:1;padding:7px 4px;border-radius:8px;display:flex;align-items:center;justify-content:center;gap:6px}
+.modes button.on{border-color:var(--c);box-shadow:inset 0 0 0 1px var(--c);background:#1c22300d}
+.modes .chip{width:10px;height:10px;border-radius:50%;background:var(--c)}
+.modes kbd{color:var(--dim);font-size:11px}
+.seg{display:flex;align-items:center;gap:6px;margin-top:8px;color:var(--dim);font-size:12px}
+.seg button{padding:3px 10px;font-size:12px}.seg button.on{border-color:var(--accent);color:var(--ink);background:#1c22300d}
+.gcard{border:1px solid var(--line);border-left:3px solid var(--c);border-radius:8px;background:var(--panel2);padding:6px 10px;margin-bottom:6px}
+.gh{display:flex;gap:6px;align-items:center}
+.gh button{padding:1px 7px;font-size:11px;color:var(--dim)}
+.gh input{flex:1;min-width:0;background:transparent;border-color:transparent;font-weight:600;font-size:12.5px;padding:1px 3px}
+.gh input:focus{border-color:var(--line);background:var(--bg);user-select:text;-webkit-user-select:text}
+.big{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--c);white-space:nowrap}
+.big small{font-size:11px;font-weight:400;color:var(--dim)}
+.gcard .s{color:var(--dim);font-size:12px}
+dl{display:grid;grid-template-columns:1fr auto;gap:0 10px;margin:3px 0 0;font-size:11.5px}
+.gcard dl{grid-template-columns:auto 1fr auto 1fr}
+dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nums}
+.cmp{border:1px solid var(--line);border-radius:8px;padding:4px 10px;margin-bottom:6px}.cmp dl{margin:0}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:6px 0}
+.row input[type=number]{width:96px}
+.btns{display:flex;gap:6px;flex-wrap:wrap}
+.list{max-height:240px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.item{display:flex;gap:8px;align-items:center;padding:3px 8px;border-bottom:1px solid var(--line);cursor:pointer;font-size:12px}
+.item:last-child{border:0}.item:hover{background:var(--panel2)}
+.item i{width:8px;height:8px;border-radius:50%;flex:none}.item span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item em{font-style:normal;color:var(--dim);font-variant-numeric:tabular-nums}
+.hint{color:var(--dim);font-size:11.5px;margin-top:12px;line-height:1.55}
+#tip{position:fixed;z-index:9;pointer-events:none;background:#fffffff5;border:1px solid var(--line);box-shadow:0 4px 14px #1c223022;color:var(--ink);border-radius:8px;padding:7px 10px;font-size:12px;display:none;max-width:280px}
+#tip b{font-size:13px}#tip .k{color:var(--dim)}
+@media (max-width:900px){#app{grid-template-columns:1fr;grid-template-areas:"head" "main" "side";height:auto}aside{border-left:0;border-top:1px solid var(--line)}}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1 id="title"></h1>
+    <div class="sub" id="overall"></div>
+    <div class="controls">
+      <label>colour scale <select id="scale"><option value="log">log</option><option value="sqrt">sqrt</option><option value="linear">linear</option></select></label>
+      <label>range <select id="range"><option value="global">all plates</option><option value="plate">per plate</option></select></label>
+      <label>well labels <select id="labels"><option value="compact">compact</option><option value="exact">exact</option><option value="none">none</option></select></label>
+      <div class="legend"><span class="zero" title="0 reads"></span><span>0</span><span id="lo"></span><div class="bar" id="bar"></div><span id="hi"></span></div>
+    </div>
+  </header>
+  <main><div class="panels" id="plates"></div></main>
+  <aside id="side"></aside>
+</div>
+<div id="tip"></div>
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(() => {
+const D = JSON.parse(document.getElementById('data').textContent);
+const wells = D.wells, panels = D.panels;
+const byId = new Map(wells.map(w => [w.id, w]));
+const KEY = 'plate-heatmap:' + D.title + ':' + wells.length;
+const state = {mode: 'A', drag: 'box', scale: D.scale || 'log', range: D.perPlate ? 'plate' : 'global', labels: 'compact', groups: {}, names: D.names.slice()};
+try {
+  const s = JSON.parse(localStorage.getItem(KEY) || 'null');
+  if (s) { for (const [id, g] of Object.entries(s.groups || {})) if (byId.has(id)) state.groups[id] = g; if (s.names) state.names = s.names; }
+} catch (e) {}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify({groups: state.groups, names: state.names})); } catch (e) {} };
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmt = n => Math.round(n).toLocaleString('en-US');
+const compact = n => {  // 950, 1.2k, 12k, 120k, 1.2M, 12M
+  if (n < 1000) return String(n);
+  for (const [d, u] of [[1e3, 'k'], [1e6, 'M'], [1e9, 'G']]) {
+    const x = n / d, r = x < 10 ? Math.round(x * 10) / 10 : Math.round(x);
+    if (r < 1000 || u === 'G') return String(r) + u;
+  }
+};
+const sum = a => a.reduce((x, y) => x + y, 0);
+const median = a => { if (!a.length) return 0; const s = a.slice().sort((x, y) => x - y), m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+const GC = {A: 'var(--A)', B: 'var(--B)'};
+const gname = g => state.names[g === 'A' ? 0 : 1] || ('Group ' + g);
+
+// ---------- colour (YlOrRd)
+const STOPS = [[0.000,[255,255,204]],[0.125,[255,237,160]],[0.250,[254,217,118]],[0.375,[254,178,76]],[0.500,[253,141,60]],[0.625,[252,78,42]],[0.750,[227,26,28]],[0.875,[189,0,38]],[1.000,[128,0,38]]];
+function cmap(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < STOPS.length; i++) if (t <= STOPS[i][0]) {
+    const [t0, c0] = STOPS[i - 1], [t1, c1] = STOPS[i], f = (t - t0) / (t1 - t0 || 1);
+    return c0.map((v, k) => Math.round(v + (c1[k] - v) * f));
+  }
+  return STOPS[STOPS.length - 1][1];
+}
+const rgb = c => `rgb(${c[0]},${c[1]},${c[2]})`;
+const TF = {log: v => Math.log10(v + 1), sqrt: v => Math.sqrt(v), linear: v => v};
+const norm = (v, lo, hi) => { const f = TF[state.scale] || TF.log, a = f(lo), b = f(hi); return b > a ? (f(v) - a) / (b - a) : 1; };
+const rng = a => a.length ? {lo: Math.min(...a), hi: Math.max(...a)} : {lo: 0, hi: 1};
+const globalR = rng(wells.filter(w => w.reads > 0).map(w => w.reads));
+const panelR = panels.map(p => rng(wells.filter(w => w.panel === p.i && w.reads > 0).map(w => w.reads)));
+const rangeFor = w => state.range === 'plate' ? panelR[w.panel] : globalR;
+function colorFor(w) {
+  if (w.reads <= 0) return {bg: 'var(--zero)', fg: '#9aa1ad'};
+  const r = rangeFor(w), c = cmap(norm(w.reads, r.lo, r.hi));
+  return {bg: rgb(c), fg: (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) > 140 ? '#111' : '#fff'};
+}
+const label = w => state.labels === 'none' ? '' : state.labels === 'exact' ? fmt(w.reads) : compact(w.reads);
+
+// ---------- build plates
+function panelHTML(p) {
+  const ws = wells.filter(w => w.panel === p.i);
+  const tot = sum(ws.map(w => w.reads)), pos = ws.filter(w => w.reads > 0).length;
+  const stats = `${fmt(tot)} reads \u00b7 ${pos}/${ws.length} wells with reads \u00b7 median ${fmt(median(ws.map(w => w.reads)))}`;
+  let h = `<section class="panel ${p.kind === 'list' ? 'plist' : p.cols > 12 ? 'p384' : 'p96'}" data-p="${p.i}"><div class="phead"><b>${esc(p.title)}</b><span class="pstats">${stats}</span>` +
+    `<span class="pbtns"><button data-act="selall">select all</button><button data-act="clr">clear</button></span></div>`;
+  if (p.kind === 'list') {
+    h += '<div class="tiles">' + ws.map(w => `<div class="well tile" data-id="${esc(w.id)}"></div>`).join('') + '</div>';
+  } else {
+    const cells = new Map(ws.map(w => [w.row + '_' + w.col, w]));
+    h += `<div class="grid" style="--cols:${p.cols}"><div></div>`;
+    for (let c = 0; c < p.cols; c++) h += `<div class="hc" data-col="${c}">${c + 1}</div>`;
+    for (let r = 0; r < p.rows; r++) {
+      h += `<div class="hr" data-row="${r}">${String.fromCharCode(65 + r)}</div>`;
+      for (let c = 0; c < p.cols; c++) { const w = cells.get(r + '_' + c); h += w ? `<div class="well" data-id="${esc(w.id)}"></div>` : '<div class="well empty"></div>'; }
+    }
+    h += '</div>';
+  }
+  return h + '</section>';
+}
+$('#plates').innerHTML = panels.map(panelHTML).join('');
+
+function decorate(el) {
+  const w = byId.get(el.dataset.id), c = colorFor(w), g = state.groups[w.id];
+  el.style.background = c.bg; el.style.color = c.fg;
+  if (el.classList.contains('tile')) el.innerHTML = `<span class="tn">${esc(w.sample)}</span><span class="tv">${state.labels === 'exact' || state.labels === 'none' ? fmt(w.reads) : compact(w.reads)}</span>`;
+  else el.textContent = label(w);
+  el.classList.toggle('selA', g === 'A'); el.classList.toggle('selB', g === 'B');
+  if (g) el.dataset.g = g; else delete el.dataset.g;
+}
+const decorateAll = () => document.querySelectorAll('.well[data-id]').forEach(decorate);
+const elMap = new Map(); document.querySelectorAll('.well[data-id]').forEach(e => elMap.set(e.dataset.id, e));
+const elOf = id => elMap.get(id) || null;
+const panelWells = panels.map(p => wells.filter(w => w.panel === p.i));
+
+// ---------- header
+$('#title').textContent = D.title;
+const allReads = sum(wells.map(w => w.reads));
+$('#overall').textContent = `${fmt(allReads)} reads \u00b7 ${wells.filter(w => w.reads > 0).length}/${wells.length} wells with reads \u00b7 ${panels.length} panel${panels.length > 1 ? 's' : ''}`;
+$('#scale').value = state.scale; $('#range').value = state.range;
+function legend() {
+  const stops = Array.from({length: 17}, (_, i) => rgb(cmap(i / 16)) + ' ' + (i / 16 * 100).toFixed(0) + '%').join(',');
+  $('#bar').style.background = `linear-gradient(90deg,${stops})`;
+  $('#lo').textContent = state.range === 'plate' ? 'min' : fmt(globalR.lo);
+  $('#hi').textContent = state.range === 'plate' ? 'max (per plate)' : fmt(globalR.hi);
+  $('#bar').title = {log: 'log10 scale', sqrt: 'square-root scale', linear: 'linear scale'}[state.scale];
+}
+for (const id of ['scale', 'range', 'labels']) $('#' + id).addEventListener('change', e => { state[id] = e.target.value; legend(); decorateAll(); });
+
+// ---------- selection
+let paintTo = null, painting = false, rafSide = 0, drag = null;
+function assign(w, g) {
+  if (g) state.groups[w.id] = g; else delete state.groups[w.id];
+  const el = elOf(w.id); if (el) decorate(el);
+}
+const modeGroup = () => state.mode === 'E' ? null : state.mode;
+function applyEl(el) {                      // freehand: paint single wells
+  const w = byId.get(el.dataset.id), cur = state.groups[w.id] || null;
+  if (cur === paintTo) return;
+  assign(w, paintTo); scheduleSide();
+}
+function boxApply(tw) {                     // box: everything between the start well and `tw`, inside the start panel
+  const p = panels[drag.panel], ws = panelWells[drag.panel];
+  let inside;
+  if (p.kind === 'plate') {
+    const r0 = Math.min(drag.start.row, tw.row), r1 = Math.max(drag.start.row, tw.row), c0 = Math.min(drag.start.col, tw.col), c1 = Math.max(drag.start.col, tw.col);
+    inside = w => w.row >= r0 && w.row <= r1 && w.col >= c0 && w.col <= c1;
+  } else {                                  // unplaced list: range in list order
+    const i0 = ws.indexOf(drag.start), i1 = ws.indexOf(tw), lo = Math.min(i0, i1), hi = Math.max(i0, i1);
+    const pos = new Map(ws.map((w, i) => [w.id, i])); inside = w => pos.get(w.id) >= lo && pos.get(w.id) <= hi;
+  }
+  for (const w of ws) {
+    const want = inside(w) ? paintTo : drag.before.get(w.id), cur = state.groups[w.id] || null;
+    if (cur !== want) assign(w, want);
+  }
+  drag.last = tw.id; scheduleSide();
+}
+function scheduleSide() { if (!rafSide) rafSide = requestAnimationFrame(() => { rafSide = 0; renderSide(); }); }
+const plates = $('#plates');
+plates.addEventListener('pointerdown', e => {
+  if (e.button !== 0) return;
+  const el = e.target.closest('.well[data-id]');
+  if (el) {
+    e.preventDefault();
+    const w = byId.get(el.dataset.id), cur = state.groups[w.id] || null, m = modeGroup();
+    paintTo = cur === m ? null : m; painting = true;
+    drag = {panel: w.panel, start: w, last: w.id, before: new Map(panelWells[w.panel].map(x => [x.id, state.groups[x.id] || null]))};
+    if (state.drag === 'box') boxApply(w); else applyEl(el);
+    return;
+  }
+  const hdr = e.target.closest('.hc,.hr');
+  if (hdr) {
+    const p = +hdr.closest('.panel').dataset.p, line = hdr.classList.contains('hc') ? ['col', +hdr.dataset.col] : ['row', +hdr.dataset.row];
+    lineSelect(wells.filter(w => w.panel === p && w[line[0]] === line[1]));
+  }
+});
+window.addEventListener('pointermove', e => {
+  if (!painting) return;
+  const el = document.elementFromPoint(e.clientX, e.clientY);
+  const t = el && el.closest && el.closest('.well[data-id]'); if (!t) return;
+  const w = byId.get(t.dataset.id);
+  if (state.drag === 'box') { if (w.panel === drag.panel && w.id !== drag.last) boxApply(w); }
+  else applyEl(t);
+});
+window.addEventListener('pointerup', () => { if (painting) { painting = false; drag = null; save(); renderSide(); } });
+function lineSelect(ws) {
+  const m = modeGroup(), all = m && ws.every(w => state.groups[w.id] === m);
+  ws.forEach(w => assign(w, all ? null : m)); save(); renderSide();
+}
+plates.addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]'); if (!b) return;
+  const p = +b.closest('.panel').dataset.p, ws = wells.filter(w => w.panel === p);
+  ws.forEach(w => assign(w, b.dataset.act === 'selall' ? modeGroup() : null)); save(); renderSide();
+});
+
+// tooltip
+const tip = $('#tip');
+function tipHTML(w) {
+  const p = panels[w.panel], pt = sum(wells.filter(x => x.panel === w.panel).map(x => x.reads)), g = state.groups[w.id];
+  const rows = [['reads', `<b>${fmt(w.reads)}</b>` + (pt ? ` <span class="k">(${(100 * w.reads / pt).toFixed(2)}% of panel)</span>` : '')]];
+  if (w.fwd || w.rev) rows.push(['utags', `${esc(w.fwd)} / ${esc(w.rev)}`]);
+  if (w.ont) rows.push(['ONT bin', esc(w.ont)]);
+  if (g) rows.push(['group', `<span style="color:${GC[g]}">${esc(gname(g))}</span>`]);
+  return `<b>${esc(w.sample)}</b>` + (w.well ? ` <span class="k">${esc(p.title)} ${w.well}</span>` : '') +
+    '<div>' + rows.map(r => `<div><span class="k">${r[0]}</span> ${r[1]}</div>`).join('') + '</div>';
+}
+plates.addEventListener('pointerover', e => {
+  const el = e.target.closest('.well[data-id]'); if (!el) { tip.style.display = 'none'; return; }
+  tip.innerHTML = tipHTML(byId.get(el.dataset.id)); tip.style.display = 'block';
+});
+plates.addEventListener('pointermove', e => {
+  if (tip.style.display === 'none') return;
+  const x = Math.min(e.clientX + 14, innerWidth - tip.offsetWidth - 8), y = Math.min(e.clientY + 14, innerHeight - tip.offsetHeight - 8);
+  tip.style.left = x + 'px'; tip.style.top = y + 'px';
+});
+plates.addEventListener('pointerleave', () => { tip.style.display = 'none'; });
+
+// ---------- sidebar
+function groupStats(g) {
+  const ws = wells.filter(w => state.groups[w.id] === g), r = ws.map(w => w.reads), t = sum(r);
+  return {ws, n: ws.length, total: t, mean: ws.length ? t / ws.length : 0, med: median(r), min: r.length ? Math.min(...r) : 0, max: r.length ? Math.max(...r) : 0, pct: allReads ? 100 * t / allReads : 0};
+}
+function gcard(g, s) {
+  return `<div class="gcard" style="--c:${GC[g]}"><div class="gh"><input class="gname" data-g="${g}" value="${esc(gname(g))}" spellcheck="false"><span class="big">${fmt(s.total)} <small>reads \u00b7 ${s.n} well${s.n === 1 ? '' : 's'}</small></span><button data-clear="${g}" title="remove all wells from this group">clear</button></div>` +
+    `<dl><dt>mean</dt><dd>${fmt(s.mean)}</dd><dt>median</dt><dd>${fmt(s.med)}</dd><dt>range</dt><dd>${s.n ? compact(s.min) + '\u2013' + compact(s.max) : '\u2013'}</dd><dt>share</dt><dd>${s.pct.toFixed(2)}%</dd></dl></div>`;
+}
+function renderSide() {
+  const A = groupStats('A'), B = groupStats('B');
+  const ratio = A.total && B.total ? (A.total / B.total).toFixed(3) : '\u2013';
+  const act = document.activeElement && document.activeElement.classList.contains('gname') ? document.activeElement.dataset.g : null;
+  const items = ['A', 'B'].flatMap(g => groupStats(g).ws.map(w => ({g, w}))).map(({g, w}) =>
+    `<div class="item" data-rm="${esc(w.id)}" title="click to remove"><i style="background:${GC[g]}"></i><span>${esc(w.sample)}${w.ont ? ' <small style="color:var(--dim)">' + esc(w.ont) + '</small>' : ''}</span><em>${fmt(w.reads)}</em></div>`).join('');
+  $('#side').innerHTML =
+    `<h2>Select wells for</h2><div class="modes">` +
+    `<button data-mode="A" class="${state.mode === 'A' ? 'on' : ''}" style="--c:var(--A)"><span class="chip"></span>${esc(gname('A'))} <kbd>1</kbd></button>` +
+    `<button data-mode="B" class="${state.mode === 'B' ? 'on' : ''}" style="--c:var(--B)"><span class="chip"></span>${esc(gname('B'))} <kbd>2</kbd></button>` +
+    `<button data-mode="E" class="${state.mode === 'E' ? 'on' : ''}" style="--c:#d63333" title="erase"><span class="chip"></span>erase <kbd>0</kbd></button></div>` +
+    `<div class="seg">drag <button data-drag="box" class="${state.drag === 'box' ? 'on' : ''}" title="drag a rectangle">box</button><button data-drag="free" class="${state.drag === 'free' ? 'on' : ''}" title="paint any wells you pass over">freehand</button></div>` +
+    `<h2>Totals</h2>${gcard('A', A)}${gcard('B', B)}` +
+    `<div class="cmp"><dl><dt>${esc(gname('A'))} / ${esc(gname('B'))}</dt><dd>${ratio}</dd><dt>${esc(gname('B'))} / ${esc(gname('A'))}</dt><dd>${A.total && B.total ? (B.total / A.total).toFixed(3) : '\u2013'}</dd>` +
+    `<dt>both groups</dt><dd>${fmt(A.total + B.total)} reads (${(A.pct + B.pct).toFixed(2)}%)</dd></dl></div>` +
+    `<h2>Add by read count</h2><div class="row"><select id="thOp"><option value="le">\u2264</option><option value="ge">\u2265</option></select><input id="thN" type="number" min="0" value="0">` +
+    `<button id="thGo">add to ${state.mode === 'E' ? 'erase' : esc(gname(state.mode))}</button></div><div class="s" style="color:var(--dim);font-size:11.5px">applies to all plates (0 = wells without reads)</div>` +
+    `<h2>Selected wells (${A.n + B.n})</h2>${items ? `<div class="list">${items}</div>` : '<div class="s" style="color:var(--dim)">none yet: click or drag over wells</div>'}` +
+    `<div class="btns" style="margin-top:10px"><button id="clrAll">clear all</button><button id="exp">export CSV</button><button id="cp">copy</button></div>` +
+    `<div class="hint">drag a box over wells (or switch to freehand) \u00b7 click a well to toggle it \u00b7 click a row or column header to select the whole line \u00b7 starting on a well already in the active group removes wells instead \u00b7 keys: <b>1</b> = A, <b>2</b> = B, <b>0</b> = erase</div>`;
+  if (act) { const inp = document.querySelector(`.gname[data-g="${act}"]`); if (inp) { inp.focus(); const l = inp.value.length; inp.setSelectionRange(l, l); } }
+}
+const side = $('#side');
+side.addEventListener('click', e => {
+  const t = e.target;
+  if (t.closest('[data-drag]')) { state.drag = t.closest('[data-drag]').dataset.drag; renderSide(); return; }
+  if (t.closest('[data-mode]')) { state.mode = t.closest('[data-mode]').dataset.mode; renderSide(); return; }
+  if (t.closest('[data-clear]')) { const g = t.closest('[data-clear]').dataset.clear; wells.filter(w => state.groups[w.id] === g).forEach(w => assign(w, null)); save(); renderSide(); return; }
+  if (t.closest('[data-rm]')) { const w = byId.get(t.closest('[data-rm]').dataset.rm); assign(w, null); save(); renderSide(); return; }
+  if (t.id === 'clrAll') { wells.forEach(w => assign(w, null)); save(); renderSide(); return; }
+  if (t.id === 'thGo') {
+    const n = +$('#thN').value, ge = $('#thOp').value === 'ge', m = modeGroup();
+    wells.filter(w => ge ? w.reads >= n : w.reads <= n).forEach(w => assign(w, m)); save(); renderSide(); return;
+  }
+  if (t.id === 'exp' || t.id === 'cp') {
+    const q = s => /[",\n]/.test(s) ? '"' + String(s).replace(/"/g, '""') + '"' : s;
+    const rows = [['group', 'sample', 'ont_barcode', 'panel', 'well', 'reads', 'utag_fwd', 'utag_rev']];
+    for (const g of ['A', 'B']) for (const w of groupStats(g).ws) rows.push([gname(g), w.sample, w.ont, panels[w.panel].title, w.well || '', w.reads, w.fwd, w.rev]);
+    const csv = rows.map(r => r.map(q).join(',')).join('\n') + '\n';
+    if (t.id === 'cp') { (navigator.clipboard ? navigator.clipboard.writeText(csv) : Promise.reject()).then(() => { t.textContent = 'copied'; setTimeout(() => t.textContent = 'copy', 1200); }, () => { t.textContent = 'failed'; }); return; }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], {type: 'text/csv'})); a.download = 'well_groups.csv'; a.click(); URL.revokeObjectURL(a.href);
+  }
+});
+side.addEventListener('input', e => {
+  if (e.target.classList.contains('gname')) { state.names[e.target.dataset.g === 'A' ? 0 : 1] = e.target.value; save(); }
+});
+side.addEventListener('change', e => { if (e.target.classList.contains('gname')) renderSide(); });
+window.addEventListener('keydown', e => {
+  if (/^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName) || e.ctrlKey || e.metaKey || e.altKey) return;
+  const m = {'1': 'A', '2': 'B', '0': 'E', 'e': 'E'}[e.key]; if (m) { state.mode = m; renderSide(); }
+});
+
+legend(); decorateAll(); renderSide();
+window.__ph = {state, wells, panels};   // for debugging in the console
+})();
+</script>
+</body>
+</html>
+"""
+
+if __name__ == "__main__":
+    main()
