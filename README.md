@@ -23,6 +23,10 @@ barbell-cdi demux -r 'fastq_pass/**/*.fastq.gz' -c nbd --samplesheet samples.csv
 
 # ONT barcodes also split the pool: ONT barcode first, then utags inside each bin
 barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out -t 16
+
+# MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
+barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --tags data/utags-10bp-sequence.csv \
+  --plates data/mab-udi-platemap.csv --samplesheet samples.csv -o mab_out -t 16
 ```
 
 `-r` takes files, globs (quote them so the script expands them; `**` recurses) or directories (searched recursively for
@@ -41,14 +45,80 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
 |---|---|---|
 | `nbd` | SQK-NBD114 | `CAGCACCT` (after every NB barcode); with `--ont-barcode NB07`: `ATTGCTAAGGTTAA` + NB07 + `CAGCACCT` |
 | `lsk` | SQK-LSK114, no ONT barcode | `CTTCGTTCAGTTACGTATTGCT` (end of the Ligation Adapter) |
+| `mab` | SQK-MAB114-24 reads not split by `barbell kit` (`twopass` uses `bare` in pass 2) | `GCCCTT` (end of the TOPO site after the AB barcode) |
 | `bare` (default) | Reads whose ONT adapter/barcode is already trimmed (`twopass` uses this in pass 2) | nothing |
 
 * **`demux`**: utags are the only sample identifier (no ONT barcodes, or one per library).
 * **`twopass`**: several ONT barcodes in one run (e.g. NB01-NB04). Pass 1 `barbell kit` splits by ONT barcode and trims it;
   pass 2 runs `demux -c bare` inside each bin, so the same utag pair can be reused in different bins.
-* Don't use `-c nbd` for LSK libraries (56% vs 93% assigned in simulation). **MAB kits (SQK-MAB114) cannot be used in CDI**: their
-  reads carry the barcode context and utag at the read start only, so no tag pair can be formed (the downstream tag is low quality/trimmed).
+* Don't use `-c nbd` for LSK libraries (56% vs 93% assigned in simulation). MAB kits can't use a tag *pair* (the utag at the
+  read end is low quality/trimmed); use them as unique dual indexes, below.
 * Unsure what is really upstream of your utags? Run `context` (see Troubleshooting) and pass its suggestion as `--prefix`.
+
+### NBD: combinatorial dual indexes
+
+The native barcode is ligated to both amplicon ends, so every read carries a utag at each end and the **pair** (fwd + rev)
+names the well. Reads come from either strand (`Ftag ... Rtag(rc)` or `Rtag ... Ftag(rc)`):
+
+```
+                      ┌─── twopass pass 1: barbell kit ───┐┌─────────────┐ pass 2: bare
+5'-[native adapter ..][ATTGCTAAGGTTAA][NB01-NB96][CAGCACCT][utag-fwd][27F] ...insert... -3'
+                      └──── -c nbd --ont-barcode NBxx ────┘└─────────────┘ utag + primer
+                                                 └ -c nbd ┘
+```
+
+The far read end is the same layout, reverse complemented, and is searched the same way.
+
+`CAGCACCT` follows every NB barcode, so `demux -c nbd` (no `--ont-barcode`) searches `CAGCACCT` + utag + primer in reads of
+any NB barcode. With one NB barcode per library, `--ont-barcode NB07` adds `ATTGCTAAGGTTAA` + NB07 to the flank (longer, more
+specific). With several NB barcodes in a run, `twopass -k SQK-NBD114-96` splits by NB barcode first, then searches utag +
+primer (`bare`) inside each bin, so the same utag pair can be reused across NB barcodes.
+
+### LSK: combinatorial dual indexes
+
+No ONT barcode: the Ligation Adapter is ligated straight onto the dA-tailed amplicon (its 3' T pairs with the dA tail), at
+both ends. As for NBD, the utag pair names the well and reads come from either strand:
+
+```
+   ┌────── Ligation Adapter ──────┐
+5'-[CCTGTA][CTTCGTTCAGTTACGTATTGCT][utag-fwd][27F] ...insert... -3'
+           └ -c lsk (last 22 nt) ─┘└─────────────┘ utag + primer
+```
+
+The far read end is the same layout, reverse complemented, and is searched the same way.
+
+Read starts are often miscalled, so `-c lsk` uses only the last 22 nt of the adapter. Don't use `-c nbd` here (no `CAGCACCT`;
+56% vs 93% assigned in simulation).
+
+### MAB: unique dual indexes
+
+With SQK-MAB114-24 the AB barcode attaches by chance to either amplicon end, and the read always starts at it, so a read starts
+with the fwd **or** the rev utag; with unique dual indexes either one names the sample. The sample is **AB barcode + the utag
+at the read start**; the far read end (low quality/truncated) is not used. The utag follows the TOPO site directly
+(checked on the real reads in `demo/mab`):
+
+```
+                     ┌── twopass pass 1: barbell kit ──┐        ┌─── pass 2: bare --single-end ────┐
+5'-[rapid adapter ..][TTTAACC][AB01-AB24][CCATATCCGTGTC][GCCCTT][utag-fwd or utag-rev][27F or 1492R] ...insert... -3'
+                                                        └──────┘ -c mab
+                                                                └───────── utag + primer ──────────┘
+```
+
+The AB barcode is attached by TOPO (`CCCTT` is the vaccinia TOPO site). Pass 1 uses barbell's built-in MAB kit (flanks
+`TTTAACC` / `CCATATCCGTGTC`); its trim leaves `GCCCTT` and sometimes cuts into it, so pass 2 searches utag + primer with no
+prefix (`bare`). `twopass -k SQK-MAB*` switches on `--single-end` by itself. For untrimmed reads, `demux -c mab` puts `GCCCTT`
+before the utag.
+
+* **Plate map** `data/mab-udi-platemap.csv` (`plate,well,ont-barcode,utag-fwd,utag-rev`): 3 plates; rows A-H = AB01-AB08 on
+  plate 1, AB09-AB16 on plate 2, AB17-AB24 on plate 3; column 1-12 = UDI 1-12 = utag-fwd `U001`-`U012` + utag-rev
+  `U017 U018 U021 U023 U025 U028 U030 U033 U034 U040 U042 U043` from `data/utags-10bp-sequence.csv`. So plate 2 well C5 = AB11 +
+  U005/U025. The 24 tags are >= 4 edits apart, fwd and rev together (both can be at the read start). Edit the rev column to
+  match your oligos.
+* **Sample sheet**: `sample,plate,well` as usual; the AB barcode comes from the plate map, so no `ont-barcode` column is needed.
+* `--single-end` needs every tag (fwd and rev) to name one sample per AB bin. Reads keep their sequenced orientation; the
+  optional `--flip` (off by default) turns reads that start with the rev tag into forward-primer orientation.
+* Real reads (`demo/mab`, AB19 bin): 84% carry a readable utag at the read start; ~0.2% of those hit a tag from another plate.
+  Simulation: `python3 simulate-reads.py mab 6000 sim.fastq`. Raise `--min-score-diff` for fewer wrong calls.
 
 Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags, plate map and sample sheet), `context`.
 
@@ -185,6 +255,7 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 | `data/utags-sequence.csv`, `data/utags-platemap.csv` | Default tags and plate map |
 | `data/samplesheet-example.csv`, `data/samplesheet-example-twopass.csv` | Example sample sheets (the second with `ont-barcode`) |
 | `data/utags-10bp-sequence.csv`, `data/utags-10bp-platemap.csv` | An alternative 10 nt tag set (`U001`-`U044`) and its plate map (rows = rev, columns = fwd tags); use with `--tags` and `--plates` |
+| `data/mab-udi-platemap.csv` | MAB unique dual index plate map: 24 AB barcodes x 12 utags (10 nt set), for `twopass -k SQK-MAB114-24` |
 | `data/fasta/` | Ready-made query FASTAs for the default primers |
 | `simulate-reads.py` | Fake reads with known truth: `python3 simulate-reads.py nbd 3000 sim.fastq` |
 | `plate-heatmap.py` | HTML heatmap of reads per well: `python3 plate-heatmap.py demux_out/summary.tsv -o plates.html` (samples are placed by the `plate`/`well` columns, so custom names need no extra file) |

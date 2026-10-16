@@ -216,6 +216,26 @@ NB_REAR = "CAGCACCT"         # constant 8 nt directly after the NB barcode
 # last 22 nt are used.
 LSK_ADAPTER = "CCTGTACTTCGTTCAGTTACGTATTGCT"
 LSK_ADAPTER_TAIL = LSK_ADAPTER[-22:]
+# MAB (SQK-MAB114-24): read start = rapid adapter ... GCTTGGGTGTTTAACC + AB barcode + CCATATCCGTGTCGCCCTT (Dorado),
+# then directly utag + primer (seen in real reads: demo/mab). The AB barcode attaches to either amplicon end, so a read
+# starts with utag-fwd + fwd primer or utag-rev + rev primer. CCCTT is the vaccinia TOPO site; barbell's kit uses only
+# TTTAACC / CCATATCCGTGTC and its trim sometimes cuts into GCCCTT, so twopass pass 2 uses no prefix (bare).
+MAB_TOPO = "CCATATCCGTGTCGCCCTT"
+MAB_PREFIX = MAB_TOPO[-6:]                     # GCCCTT: directly 5' of the utag on untrimmed reads (-c mab)
+MAB_SEQS = {    # Dorado TP01-TP24 = barbell AB01-AB24
+    "AB01": "GCACCTGGAACTTGTGCCTTCCAC", "AB02": "CCGAAATAGGTTATCTGTTGTTGT",
+    "AB03": "ATCAATCGCTGGACGATGGATTAG", "AB04": "CCACCCGCTCCTGCCGGTGGGCGT",
+    "AB05": "AGACTCTTGGGCTCGCCACGTCCC", "AB06": "TCTGTATCCGGAGACGGGATGGAC",
+    "AB07": "TTTCGGATCAATCGACCGCAAACG", "AB08": "ACTCAAACATTCTGTTAGATCGCG",
+    "AB09": "AAATGGAACCCGGATATGTTTACT", "AB10": "TAAATCGACCTATGATGAACACAG",
+    "AB11": "ACATGTTGGAGTGAAAGTCGGGTA", "AB12": "CCTGGACCACGATCATTGTAACAT",
+    "AB13": "TATGGTGGATCTCCCTCTATCTTC", "AB14": "AAGTAAATGGGACGCCCACTCCGA",
+    "AB15": "TGTTCGCGGCTTGATCTAATATTA", "AB16": "AGAGAGCTTCCCGGGAGGGTGGTC",
+    "AB17": "TTGTGAATATCTGTCACAAACACC", "AB18": "CAATCGTACCAGGGAACATAAAGT",
+    "AB19": "CACACCCAAACAATATGGACCCGT", "AB20": "AATAACCACATCCGCCCTCCGCAC",
+    "AB21": "TCCTAATAATGTGTAGATCGGTCC", "AB22": "AGTCGATGGAACAAGAGAAGTTAT",
+    "AB23": "AAACTCACTGTATGTCGTTTCTAT", "AB24": "TGACATCACTGATCGAGGAAGATC",
+}
 
 
 NB_SEQS = {
@@ -268,6 +288,8 @@ NB_SEQS = {
     "NB93": "AGTTTCCATCACTTCAGACTTGGG", "NB94": "GATTGTCCTCAAACTGCCACCTAC",
     "NB95": "CCTGTCTGGAAGAAGAATGGACTT", "NB96": "CTGAACGGTCATAGAGTCCACCAT",
 }
+
+CONTEXTS = ["bare", "nbd", "lsk", "mab"]
 
 COMP = str.maketrans("ACGTRYMKSWBDHVN", "TGCAYRKMSWVHDBN")
 
@@ -437,10 +459,12 @@ def read_plates(path, sheet=None, design=None):
             if not hit:
                 sys.exit(f"{path}: sample '{name}': plate {plate} well {pw[1]} is not in the plate map ({design})")
             r["utag-fwd"], r["utag-rev"] = hit["utag-fwd"], hit["utag-rev"]
-        # where the sample sits, for summary.tsv and plate-heatmap.py
-        loc = by_pair.get((r["utag-fwd"], r["utag-rev"]))
+            r["ont"] = r["ont"] or hit.get("ont", "")   # e.g. the AB barcode of the well in a MAB plate map
+        # where the sample sits, for summary.tsv and plate-heatmap.py. Its own plate/well first: in a MAB
+        # plate map the same tag pair is in every AB bin, so the pair alone does not name one well
+        loc = (plate_label(plate), pw[1]) if pw and plate else by_pair.get((r["utag-fwd"], r["utag-rev"]))
         if not loc and pw:
-            loc = (plate_label(plate) if plate else "", pw[1])
+            loc = ("", pw[1])
         if not loc and name_col == "plate-well":
             loc = split_plate_well(name)
             loc = loc and (plate_label(loc[0]) if loc[0] else "", loc[1])
@@ -505,6 +529,11 @@ def context_prefix(context, ont_barcode=None, prefix=None):
         if ont_barcode:
             sys.exit("the lsk context has no ONT barcode (SQK-LSK is unbarcoded); drop --ont-barcode")
         return LSK_ADAPTER_TAIL
+    if context == "mab":
+        if ont_barcode:
+            sys.exit("the mab context does not put the AB barcode in the utag query (the TOPO join is variable); "
+                     "drop --ont-barcode and split by AB barcode with twopass -k SQK-MAB114-24")
+        return MAB_PREFIX
     if context == "nbd":
         if ont_barcode:
             if ont_barcode not in NB_SEQS:
@@ -656,14 +685,17 @@ FILTERS = [
     # reverse-strand read: left utag-rev ... right utag-fwd (reverse complemented)
     "Rtag[fw, *, @left(0..{m}), >>]__Ftag[<<, rc, *, @right(0..{m})]",
 ]
+# --single-end (MAB): one utag at the read start, fwd or rev (the AB barcode attaches to either amplicon end);
+# whatever is at the far end is not used (as barbell's own single-label kits)
+FILTERS_SINGLE = ["Ftag[fw, *, @left(0..{m}), >>]", "Rtag[fw, *, @left(0..{m}), >>]"]
 
 
-def label_pair(fname, tag_ids):
-    """'U013__U001.trimmed.fastq[.gz]' (or with _fw/_rc suffixes) -> ('U013','U001')"""
+def label_pair(fname, tag_ids, n=2):
+    """'U013__U001.trimmed.fastq[.gz]' (or with _fw/_rc suffixes) -> ('U013','U001'); n=1: 'U013.trimmed.fastq' -> ('U013',)"""
     base = re.sub(r"\.trimmed\.fastq(\.gz)?$", "", os.path.basename(fname))
     pat = "|".join(sorted(map(re.escape, tag_ids), key=len, reverse=True))
     ids = re.findall(r"(?<![A-Za-z0-9])(" + pat + r")(?![A-Za-z0-9])", base)
-    return tuple(ids) if len(ids) == 2 else None
+    return tuple(ids) if len(ids) == n else None
 
 
 FASTQ_EXT = (".fastq", ".fastq.gz", ".fq", ".fq.gz")
@@ -781,7 +813,16 @@ def cmd_demux(a):
     reads = expand_reads(a.reads)
     barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
     tags, plates = read_tags(a.tags), load_layout(a)
-    well_of = {(r["utag-fwd"], r["utag-rev"]): r["plate-well"] for r in plates}
+    single = a.single_end
+    if single:              # unique dual indexes: the utag at the read start (fwd OR rev) names the sample on its own
+        n_tag = Counter(t for r in plates for t in {r["utag-fwd"], r["utag-rev"]})
+        dup = [t for t, n in n_tag.items() if n > 1]
+        if dup:
+            sys.exit(f"--single-end: tag(s) {', '.join(sorted(dup))} are used by more than one sample (or as both fwd and rev); "
+                     "a single tag must name one sample (unique dual indexes; split by ONT/AB barcode with twopass)")
+        well_of = {(r[s],): r["plate-well"] for r in plates for s in ("utag-fwd", "utag-rev")}
+    else:
+        well_of = {(r["utag-fwd"], r["utag-rev"]): r["plate-well"] for r in plates}
     trows = tag_rows(a, plates)
     fwd_ids = {r["utag-fwd"] for r in trows}
     rev_ids = {r["utag-rev"] for r in trows}
@@ -827,7 +868,7 @@ def cmd_demux(a):
     tot_p = sum(pc.values()) or 1
     print()
     print_found_per_read(pc)
-    if pc["tag_both_ends"] < 0.5 * tot_p and (pc["tag_one_end_only"] + pc["tag_plus_flank_other_end"]) > 0.3 * tot_p:
+    if not single and pc["tag_both_ends"] < 0.5 * tot_p and (pc["tag_one_end_only"] + pc["tag_plus_flank_other_end"]) > 0.3 * tot_p:
         print()
         print_note("most reads carry a utag at one end only, so no tag PAIR can be formed and few reads can be assigned.\n"
                    "Usual causes: the far end has no utag in this library/prep,\n"
@@ -837,7 +878,7 @@ def cmd_demux(a):
     print_step("[4/6] filter")
     filt = os.path.join(bb, "filters.txt")
     with open(filt, "w") as fh:
-        fh.write("\n".join(f.format(m=a.max_offset) for f in FILTERS) + "\n")
+        fh.write("\n".join(f.format(m=a.max_offset) for f in (FILTERS_SINGLE if single else FILTERS)) + "\n")
     filtered = os.path.join(bb, "filtered.tsv")
     cmd = [barbell, "filter", "-i", anno, "-f", filt, "-o", filtered]
     if "--dropped" in filt_help:
@@ -854,7 +895,7 @@ def cmd_demux(a):
             cmd.append(opt)
     if "--failed-out" in trim_help:
         cmd += ["--failed-out", os.path.join(bb, "trim_failed.txt")]
-    native_flip = "--flip" in trim_help
+    native_flip = "--flip" in trim_help and not single   # barbell flips on an rc Ftag; single-end reads are flipped here
     if native_flip and not a.no_flip:
         cmd.append("--flip")          # every read -> forward-primer -> reverse-primer orientation
     do_flip_here = (not native_flip) and (not a.no_flip)
@@ -865,19 +906,22 @@ def cmd_demux(a):
     if merged and not a.keep_merged and os.path.exists(merged):
         os.remove(merged)
 
-    print_step("[6/6] rename tag pairs -> sample names")
+    print_step(f"[6/6] rename {'utags' if single else 'tag pairs'} -> sample names")
     ext = ".fastq.gz" if a.gzip else ".fastq"
     count_open = gzip.open if a.gzip else open
     per_well = defaultdict(list)           # sample -> [(file, needs_rc)]
     unexpected = []
     for f in sorted(glob.glob(os.path.join(tdir, "*.trimmed.fastq*"))):
-        pair = label_pair(f, tags)
+        pair = label_pair(f, tags, 1 if single else 2)
         if not pair:
             unexpected.append(f)
             continue
-        x, y = pair
-        rev_strand = x in rev_ids and y in fwd_ids       # file is Rtag__Ftag
-        key = (y, x) if rev_strand else (x, y)
+        if single:                       # read starts with utag-rev: reverse-primer orientation (flipped only with --flip)
+            rev_strand, key = pair[0] in rev_ids and pair[0] not in fwd_ids, pair
+        else:
+            x, y = pair
+            rev_strand = x in rev_ids and y in fwd_ids       # file is Rtag__Ftag
+            key = (y, x) if rev_strand else (x, y)
         if key in well_of:
             per_well[well_of[key]].append((f, rev_strand and do_flip_here))
         else:
@@ -914,10 +958,13 @@ def cmd_demux(a):
     tot = sum(counts.values())
     stats = [("total_reads", n_total),
              ("reads_with_ge1_tag_or_flank_hit", n_ann),
-             ("reads_assigned_to_wells", tot),
-             ("pattern_reads_tag_both_ends", pc["tag_both_ends"]),
-             ("pattern_reads_tag_one_end_only", pc["tag_one_end_only"] + pc["tag_plus_flank_other_end"]),
-             ("wells_with_reads", len(counts)),
+             ("reads_assigned_to_wells", tot)]
+    if single:
+        stats.append(("pattern_reads_with_utag", sum(n for k, n in pc.items() if k != "flank_only")))
+    else:
+        stats += [("pattern_reads_tag_both_ends", pc["tag_both_ends"]),
+                  ("pattern_reads_tag_one_end_only", pc["tag_one_end_only"] + pc["tag_plus_flank_other_end"])]
+    stats += [("wells_with_reads", len(counts)),
              ("wells_expected", len(plates)),
              ("unexpected_or_unparsed_files", len(unexpected))]
     unexp_tsv = os.path.join(out, "unexpected.tsv")
@@ -925,12 +972,15 @@ def cmd_demux(a):
     with open(unexp_tsv, "w") as fh:          # tag pairs found on reads but not in the sample list
         fh.write("file\tutag_fwd\tutag_rev\treads\n")
         for f in unexpected:
-            pair = label_pair(f, tags)
-            if pair and pair[0] in rev_ids and pair[1] in fwd_ids:
+            pair = label_pair(f, tags, 1 if single else 2)
+            if pair and not single and pair[0] in rev_ids and pair[1] in fwd_ids:
                 pair = pair[::-1]
+            if pair and single:
+                pair = ("", pair[0]) if pair[0] in rev_ids and pair[0] not in fwd_ids else (pair[0], "")
+            pair = pair or ("", "")
             n = count_fastq_reads(f)
             n_unexp += n
-            fh.write(f"barbell/trimmed/{os.path.basename(f)}\t{pair[0] if pair else ''}\t{pair[1] if pair else ''}\t{n}\n")
+            fh.write(f"barbell/trimmed/{os.path.basename(f)}\t{pair[0]}\t{pair[1]}\t{n}\n")
     stats.append(("unexpected_reads", n_unexp))
     run_csv = os.path.join(out, "run_summary.csv")
     with open(run_csv, "w", newline="") as fh:
@@ -954,6 +1004,11 @@ def cmd_twopass(a):
     reads = expand_reads(a.reads)
     barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
     rows = load_layout(a)
+    mab = a.kit.upper().startswith("SQK-MAB")
+    ctx2 = a.context or "bare"                          # pass 1 trimmed the ONT barcode and its flanks
+    single = a.single_end or mab                        # MAB reads carry barcode + utag at the read start only
+    if mab:
+        print_info("MAB kit: pass 2 searches one utag (fwd or rev) + primer at the read start; the far read end is not used")
     out = os.path.abspath(a.outdir)
     DISPLAY_BASE[0] = out
     bb = os.path.join(out, "barbell")         # barbell's own files; samples/ and the summaries stay in out
@@ -1007,7 +1062,7 @@ def cmd_twopass(a):
             w.writerow(["sample", "plate", "well", "utag-fwd", "utag-rev"])
             for r in bin_rows[b]:
                 w.writerow([r["plate-well"], r["plate"], r["well"], r["utag-fwd"], r["utag-rev"]])
-        cmd = [sys.executable, os.path.abspath(__file__), "demux", "-r", f, "-c", "bare",
+        cmd = [sys.executable, os.path.abspath(__file__), "demux", "-r", f, "-c", ctx2,
                "-o", bdir, "-t", str(a.threads), "--barbell", barbell,
                "--samplesheet", sheet, "--plates", a.plates, "--tags", a.tags,
                "--max-offset", str(a.max_offset)]
@@ -1017,7 +1072,7 @@ def cmd_twopass(a):
             if val is not None:
                 cmd += [opt, str(val)]
         cmd += [x for x, on in (("--flip", not a.no_flip), ("--gzip", a.gzip),
-                                ("--no-decoys", a.no_decoys)) if on]
+                                ("--no-decoys", a.no_decoys), ("--single-end", single)) if on]
         r = subprocess.run(cmd, capture_output=True, text=True, env={**os.environ, "NO_COLOR": "1"})
         if r.returncode:
             for ln in (r.stdout + r.stderr).strip().splitlines()[-10:]:
@@ -1152,7 +1207,7 @@ def cmd_context(a):
 
 def cmd_queries(a):
     tags, plates = read_tags(a.tags), load_layout(a)
-    ctxs = a.context or ["bare", "nbd", "lsk"]
+    ctxs = a.context or CONTEXTS
     for c in ctxs:
         print_step(f"query FASTAs: {c}")
         build_queries(a.outdir, tag_rows(a, plates), tags, c, a.ont_barcode, a.prefix, a.all_tags,
@@ -1208,12 +1263,12 @@ def plate_map_report(a, tags, layout):
         cols = sorted({well_rc(r["well"])[1] for r in prs})
 
         def along(axis):                    # which tag is constant along each row (axis 0) / column (axis 1)
-            for side in ("utag-fwd", "utag-rev"):
+            for side in ("utag-fwd", "utag-rev", "ont"):
                 g = defaultdict(set)
                 for r in prs:
                     g[well_rc(r["well"])[axis]].add(r[side])
-                if all(len(v) == 1 for v in g.values()):
-                    return f"{side[5:]} {id_ranges(next(iter(v)) for v in g.values())}"
+                if all(len(v) == 1 and "" not in v for v in g.values()):
+                    return f"{side[5:] or 'ONT'} {id_ranges(next(iter(v)) for v in g.values())}"
             return style("mixed", "yellow")
         rows.append([style(plate or "?", "cyan"), fmt_int(len(prs)),
                      f"{letters[0]}-{letters[-1]}" if letters else "", f"{cols[0]}-{cols[-1]}" if cols else "",
@@ -1331,16 +1386,20 @@ def main():
     q = sp.add_parser("queries", epilog=INPUT_HELP, formatter_class=raw, help="write left/right query FASTAs for one or more contexts")
     common(q); ctx(q, None)
     q.add_argument("-o", "--outdir", default="fasta")
-    q.add_argument("-c", "--context", action="append", choices=["bare", "nbd", "lsk"],
-                   help="context(s) to write, repeatable (default: all three)")
+    q.add_argument("-c", "--context", action="append", choices=CONTEXTS,
+                   help="context(s) to write, repeatable (default: all)")
     q.set_defaults(fn=cmd_queries)
 
     d = sp.add_parser("demux", epilog=INPUT_HELP, formatter_class=raw, help="annotate -> inspect -> filter -> trim -> split reads into samples")
     common(d); ctx(d, "bare")
     d.add_argument("-r", "--reads", nargs="+", required=True, help="FASTQ file(s)/globs (.fastq or .fastq.gz)")
     d.add_argument("-o", "--outdir", default="demux_out")
-    d.add_argument("-c", "--context", choices=["bare", "nbd", "lsk"], default="bare",
-                   help="sequence 5' of the utag: nbd, lsk, or bare for reads already trimmed of ONT adapters (default: bare)")
+    d.add_argument("-c", "--context", choices=CONTEXTS, default="bare",
+                   help="sequence 5' of the utag: nbd, lsk, mab (end of the MAB TOPO site), or bare for reads already trimmed "
+                        "of ONT adapters (default: bare)")
+    d.add_argument("--single-end", action="store_true",
+                   help="one utag at the read start (fwd or rev) names the sample: unique dual indexes, e.g. MAB; "
+                        "the far read end is not used")
     d.add_argument("-t", "--threads", type=int, default=10)
     d.add_argument("--barbell", default="barbell")
     d.add_argument("--flank-max-errors", type=int, help="relax if too many reads are missed (default: barbell decides)")
@@ -1355,7 +1414,11 @@ def main():
     t2 = sp.add_parser("twopass", epilog=INPUT_HELP, formatter_class=raw, help="barbell kit (ONT barcode) first, then utag demux inside each ONT bin")
     common(t2)
     t2.add_argument("-r", "--reads", nargs="+", required=True)
-    t2.add_argument("-k", "--kit", required=True, help="barbell kit name, e.g. SQK-NBD114-96, SQK-NBD114-24")
+    t2.add_argument("-k", "--kit", required=True, help="barbell kit name, e.g. SQK-NBD114-96, SQK-NBD114-24, SQK-MAB114-24")
+    t2.add_argument("-c", "--context", choices=CONTEXTS,
+                    help="pass 2 context 5' of the utag (default: bare, pass 1 trimmed the ONT barcode)")
+    t2.add_argument("--single-end", action="store_true",
+                    help="pass 2 uses only the utag at the read start, fwd or rev (default for SQK-MAB kits)")
     t2.add_argument("-o", "--outdir", default="twopass_out")
     t2.add_argument("-t", "--threads", type=int, default=10)
     t2.add_argument("--barbell", default="barbell")
