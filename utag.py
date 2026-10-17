@@ -1062,6 +1062,8 @@ def cmd_twopass(a):
     cmd = [barbell, "kit", "-k", a.kit, "-i", *in_reads, "-o", kitdir, "-t", str(a.threads)]
     if "--maximize" in kit_help and not a.no_maximize:
         cmd.append("--maximize")
+    if a.kit_flank_max_errors is not None:
+        cmd += ["--flank-max-errors", str(a.kit_flank_max_errors)]
     if a.gzip and "--gzip" in kit_help:
         cmd.append("--gzip")
     run(cmd, os.path.join(bb, "pass1_kit.log"))
@@ -1234,6 +1236,7 @@ def cmd_context(a):
     U = a.upstream
     ups = {"start": [], "end": []}           # utag + primer read 5'->3' on the read (start) or on its rc (end)
     sides = {"start": Counter(), "end": Counter()}
+    with_hit = Counter()                     # reads with >= 1 hit: "start", "end", "any"
     seen = 0
     for path in reads:
         op = gzip.open if path.endswith(".gz") else open
@@ -1245,6 +1248,7 @@ def cmd_context(a):
                 seq = fh.readline().strip().upper()
                 fh.readline(); fh.readline()
                 seen += 1
+                before = {w: len(ups[w]) for w in ups}
                 for where, x in (("start", seq), ("end", rc(seq))):
                     for side, ids, pat in (("fwd", fwd, pf), ("rev", rev, pr)):
                         for t in ids:
@@ -1255,15 +1259,24 @@ def cmd_context(a):
                                     ups[where].append(x[max(0, i - U):i].rjust(U, "-"))
                                     sides[where][side] += 1
                                 i = x.find(tg, i + 1)
+                got = [w for w in ups if len(ups[w]) > before[w]]
+                with_hit.update(got + (["any"] if got else []))
         if seen >= a.n_reads:
             break
     print_step("context: sequence upstream of the utags")
-    print_info(f"scanned {fmt_int(seen)} reads, both strands; looked for  <upstream> + utag + primer start")
-    print_info(f"upstream aligned (indels allowed) to the known adapters, ending at the utag "
-               f"(up to {fmt_int(a.n_align)} hits per read end)")
+    print_info(f"scanned {fmt_int(seen)} reads; a hit = an exact match of utag + first 10 nt of the primer")
+    print(style("    read start: the hit is in the read as sequenced, so the adapter before the utag is the start of the read\n"
+                "    read end:   the hit is in the reverse complement of the read, so the utag is near the end of the read;\n"
+                "                the adapter after it is shown reverse-complemented, in the same orientation as at the start", "gray"))
+    print_info(f"reads with a hit: {fmt_int(with_hit['any'])} ({100 * with_hit['any'] / max(1, seen):.0f}%); "
+               f"at the read start {fmt_int(with_hit['start'])}, at the read end {fmt_int(with_hit['end'])}")
+    print(style("    hits need ~20 error-free bases (utag + 10 nt of primer), so ~50% of reads is normal at Q15 near the "
+                "read start; demux allows errors and assigns more", "gray"))
+    print_info(f"the sequence before each hit is aligned (indels allowed) to the known adapters, ending at the utag; "
+               f"all % below are of the first {fmt_int(a.n_align)} hits at that read end")
     dists = {}                   # where -> context -> [suffix_edits per hit]
-    for where, label in (("start", "read start  (utag + primer on the read)"),
-                         ("end", "read end  (utag + primer on the reverse complement)")):
+    for where, label in (("start", "read start  (utag near the 5' end of the read)"),
+                         ("end", "read end  (utag near the 3' end of the read, shown reverse-complemented)")):
         L = ups[where]
         n_side = ", ".join(f"{k} {fmt_int(v)}" for k, v in sorted(sides[where].items()))
         print(f"\n  {style(label, 'bold')}  {style(fmt_int(len(L)) + ' hits', 'green' if len(L) >= 10 else 'red')}"
@@ -1272,6 +1285,8 @@ def cmd_context(a):
             print_note("too few hits: check --primer-f/--primer-r, the tag file and the sample sheet")
             continue
         S = L[:a.n_align]
+        print(style(f"    % = of {fmt_int(len(S))} hits" + (f" (first {fmt_int(len(S))} of {fmt_int(len(L))})"
+                                                             if len(S) < len(L) else ""), "gray"))
         pc = lambda n: style(f"{100 * n / len(S):5.1f}%", pct_color(100 * n / len(S)))
         D = dists[where] = {ctx: [suffix_edits(seq, u) for u in S] for ctx, _, seq, _ in KNOWN_CONTEXTS}
         # 1. which known adapter is there: the whole adapter within ~15% edits
@@ -1281,18 +1296,21 @@ def cmd_context(a):
             k = present_edits(len(seq))
             rows.append([style(ctx, "cyan"), name, str(len(seq)), pc(sum(e == 0 for e in full)),
                          *(pc(sum(e <= m for e in full)) for m in (1, 2, 3)), f"{pc(sum(e <= k for e in full))} (<= {k})"])
-        print_table(["-c", "adapter 5' of the utag", "nt", "exact", "<=1", "<=2", "<=3 edits", "present"],
+        print_table(["-c", "whole adapter 5' of the utag", "nt", "exact", "<=1", "<=2", "<=3 edits", "present"],
                     rows, "<<>>>>>>", indent=4)
+        print(style("    hits with the whole adapter right before the utag, within that many edits; "
+                    "present = within ~15% of its length", "gray"))
         # 2. for the adapter that fits best: how much of it is readable (suffixes ending at the utag)
         ctx, name, seq, qlen = max(KNOWN_CONTEXTS, key=lambda c: sum(context_ok(D[c[0]], len(c[2]))))
         if sum(context_ok(D[ctx], len(seq))) >= 0.3 * len(S) or sum(context_ok(D[ctx], 6)) >= 0.5 * len(S):
-            print(f"\n    {style(ctx, 'cyan')} adapter, last n nt before the utag:")
+            print(f"\n    {style(ctx, 'cyan')} adapter: % of hits with its last n nt right before the utag, "
+                  "within that many edits")
             rows = []
             for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
                 note = "  (-c " + ctx + ")" if n == qlen else "  (whole)" if n == len(seq) else ""
                 rows.append([f"last {n}{note}", color_seq(seq[-n:]),
                              *(pc(sum(d[n] <= m for d in D[ctx])) for m in (0, 1, 2, 3))])
-            print_table(["suffix", "sequence", "exact", "<=1", "<=2", "<=3 edits"], rows, "<<>>>>", indent=4)
+            print_table(["suffix", "sequence  <utag>", "exact", "<=1", "<=2", "<=3 edits"], rows, "<>>>>>", indent=4)
         # 3. per-position consensus: shows sequence beyond the known adapters (unknown kits)
         cons, supp = [], []
         for pos in range(U):
@@ -1315,7 +1333,8 @@ def cmd_context(a):
                                          "indels and short read ends shorten it)", "gray")),
             ("most common 12 nt", "   ".join(f"{color_seq(k)} {style(SYM['times'] + str(v), 'gray')}" for k, v in top)),
         ], indent=4)
-    print(style("\n  consensus '.' = no majority base; support digit = tens of % of hits (9 = 90-100%)", "gray"))
+    print(style("\n  consensus: majority base at each position before the utag ('.' = none); support digit = "
+                "tens of % of all hits at that read end with that base (9 = 90-100%)", "gray"))
     if dists:
         context_verdict(dists, ups, a.n_align)
 
@@ -1340,19 +1359,22 @@ def context_verdict(dists, ups, n_align):
                    "the reads look trimmed (adapter/barcode removed) or the kit is unknown")
         print_kv([("use", style("-c bare", "bold") + "  (or --prefix from the consensus above)")], indent=4)
         return
-    print_ok(f"{name}: whole adapter at {100 * f0:.0f}% of the utags at the read {where0}  ->  kit context "
-             + style("-c " + ctx, "bold"))
+    n0 = len(dists[where0][ctx])
+    print_ok(f"{name}: the whole adapter is right before the utag in {100 * f0:.0f}% of {fmt_int(n0)} hits at the "
+             f"read {where0}  ->  kit context " + style("-c " + ctx, "bold"))
     # can the -c query (last qlen nt) be found at both read ends? the read end often stops inside the adapter
     rows, longest = [], None
     for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
         fr = {w: frac(w, ctx, n) for w in dists}
-        rows.append([f"last {n}" + ("  (-c " + ctx + ")" if n == qlen else ""), color_seq(seq[-n:]),
+        rows.append([f"last {n}" + ("  (-c " + ctx + ")" if n == qlen else ""), color_seq(seq[-n:]), f"<= {present_edits(n)}",
                      *(style(f"{100 * fr[w]:5.1f}%", pct_color(100 * fr[w])) if w in fr else "-" for w in ("start", "end"))])
         if all(v >= 0.7 for v in fr.values()):
             longest = n
     print()
-    print_table(["adapter suffix", "sequence", "read start", "read end"], rows, "<<>>", indent=4)
-    print(style(f"    % of utag hits with that suffix within ~15% edits", "gray"))
+    hdr = [f"read {w} ({fmt_int(len(dists[w][ctx]))} hits)" if w in dists else f"read {w}" for w in ("start", "end")]
+    print_table(["adapter suffix", "sequence  <utag>", "edits", *hdr], rows, "<>>>>", indent=4)
+    print(style("    % of hits at that read end with that adapter suffix right before the utag (within the edits shown); "
+                "the -c query should be >= 70% at both ends", "gray"))
     q_ok = all(frac(w, ctx, qlen) >= 0.7 for w in dists)
     use = f"utag demux -c {ctx}"
     alt = None
@@ -1604,7 +1626,10 @@ def main():
     t2.add_argument("-t", "--threads", type=int, default=10)
     t2.add_argument("--barbell", default="barbell")
     t2.add_argument("--no-maximize", action="store_true", help="pass 1 without --maximize")
-    t2.add_argument("--flank-max-errors", type=int)
+    t2.add_argument("--flank-max-errors", type=int, help="pass 2 (utag + primer flank) max errors (default: barbell decides)")
+    t2.add_argument("--kit-flank-max-errors", type=int,
+                    help="pass 1 (barbell kit) flank max errors (default: barbell decides, often 3). Raise to 4-5 if many "
+                         "reads end up in no ONT bin: noisy read starts (on real MAB reads 3 -> 53%%, 4 -> 71%%, 5 -> 86%% binned)")
     t2.add_argument("--min-score-diff", type=float, help="min score difference between the best and second-best tag (default: barbell, 0.1); raise for fewer wrong-well calls")
     t2.add_argument("--max-offset", type=int, default=250)
     t2.add_argument("--flip", dest="no_flip", action="store_false", default=True,

@@ -114,6 +114,11 @@ before the utag.
   `U017 U018 U021 U023 U025 U028 U030 U033 U034 U040 U042 U043` from `data/utags-10bp-sequence.csv`. So plate 2 well C5 = AB11 +
   U005/U025. The 24 tags are >= 4 edits apart, fwd and rev together (both can be at the read start). Edit the rev column to
   match your oligos.
+* **Few reads in AB bins?** MAB read starts are noisy, and pass 1 (`barbell kit`) allows only 3 errors in its 44 nt
+  flank + AB barcode by default. On real reads `--kit-flank-max-errors 4` raised the binned reads from 52-84% to 70-91% per AB
+  barcode with no reads in a wrong bin (5 binned more but put 0.2-0.4% in a wrong bin). If the reads are already split into
+  `barcodeNN` folders by MinKNOW/Dorado (adapters not trimmed), you can skip pass 1 and run `demux -c mab --single-end` per
+  folder: 81% assigned vs 46% with the default `twopass` on the same AB19 reads.
 * **Sample sheet**: `sample,plate,well` as usual; the AB barcode comes from the plate map, so no `ont-barcode` column is needed.
 * `--single-end` needs every tag (fwd and rev) to name only one sample per AB bin. Reads keep their sequenced orientation; the
   optional `--flip` (off by default) turns reads that start with the rev tag into forward-primer orientation.
