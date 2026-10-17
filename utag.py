@@ -1182,15 +1182,58 @@ IUPAC_RE = {"A": "A", "C": "C", "G": "G", "T": "T", "R": "[AG]", "Y": "[CT]", "M
             "S": "[CG]", "W": "[AT]", "B": "[CGT]", "D": "[AGT]", "H": "[ACT]", "V": "[ACG]", "N": "[ACGT]", "I": "[ACGT]"}
 
 
+def suffix_edits(adapter, up):
+    """d[k] = fewest edits (indels allowed) to align adapter[-k:] so that it ends exactly where `up` ends (at the
+    utag); it may start anywhere in `up`. One DP over the reversed strings gives every suffix length at once."""
+    q, t = adapter[::-1], up[::-1][:len(adapter) + 12]
+    row = list(range(len(t) + 1))           # 0 adapter bases used: skipping read bases next to the utag costs
+    d = [0]
+    for x in q:
+        new = [row[0] + 1]
+        for j, y in enumerate(t, 1):
+            new.append(min(row[j] + 1, new[j - 1] + 1, row[j - 1] + (x != y)))
+        row = new
+        d.append(min(row))
+    return d
+
+
+# known sequence directly 5' of the utag: (context, name, sequence, -c query length)
+KNOWN_CONTEXTS = [("lsk", "Ligation Adapter (SQK-LSK114)", LSK_ADAPTER, len(LSK_ADAPTER_TAIL)),
+                  ("nbd", "NB rear (SQK-NBD114)", NB_REAR, len(NB_REAR)),
+                  ("mab", "TOPO site (SQK-MAB114)", MAB_TOPO, len(MAB_PREFIX))]
+
+
+BARCODE_SAMPLE = 150     # hits checked for the NB / AB barcode (96 alignments each)
+
+
+def present_edits(n):
+    """edits allowed for a known adapter to count as present (~15%, at least 1)"""
+    return max(1, round(0.15 * n))
+
+
+def best_barcode(seqs, up_list, flank_len):
+    """Which ONT barcode sits just 5' of a known flank of flank_len nt: Counter of barcode -> reads (or '?')."""
+    c = Counter()
+    for up in up_list:
+        region = up[:-flank_len] if flank_len else up
+        scores = sorted((suffix_edits(s, region)[-1], b) for b, s in seqs.items())
+        best, second = scores[0], scores[1]
+        c[best[1] if best[0] <= 6 and second[0] - best[0] >= 2 else "?"] += 1
+    return c
+
+
 def cmd_context(a):
-    """Read the constant sequence upstream of the utags off the reads themselves (consensus)."""
+    """Read the constant sequence upstream of the utags off the reads: align it against the known kit adapters
+    (indels allowed) and say which -c context fits. Read starts and read ends are reported apart: the read end
+    often stops inside the adapter. The per-position consensus is shown for unknown kits."""
     reads = expand_reads(a.reads)
     tags, plates = read_tags(a.tags), load_layout(a)
     fwd, rev = used_tags(plates, tags)
     pf = re.compile("".join(IUPAC_RE[c] for c in (a.primer_f or PRIMER_F).upper()[:10]))
     pr = re.compile("".join(IUPAC_RE[c] for c in (a.primer_r or PRIMER_R).upper()[:10]))
     U = a.upstream
-    ups = {"fwd": [], "rev": []}
+    ups = {"start": [], "end": []}           # utag + primer read 5'->3' on the read (start) or on its rc (end)
+    sides = {"start": Counter(), "end": Counter()}
     seen = 0
     for path in reads:
         op = gzip.open if path.endswith(".gz") else open
@@ -1202,25 +1245,55 @@ def cmd_context(a):
                 seq = fh.readline().strip().upper()
                 fh.readline(); fh.readline()
                 seen += 1
-                for x in (seq, rc(seq)):
+                for where, x in (("start", seq), ("end", rc(seq))):
                     for side, ids, pat in (("fwd", fwd, pf), ("rev", rev, pr)):
                         for t in ids:
                             tg = tags[t]
                             i = x.find(tg)
                             while i >= 0:
                                 if pat.match(x, i + len(tg)):
-                                    ups[side].append(x[max(0, i - U):i].rjust(U, "-"))
+                                    ups[where].append(x[max(0, i - U):i].rjust(U, "-"))
+                                    sides[where][side] += 1
                                 i = x.find(tg, i + 1)
         if seen >= a.n_reads:
             break
     print_step("context: sequence upstream of the utags")
     print_info(f"scanned {fmt_int(seen)} reads, both strands; looked for  <upstream> + utag + primer start")
-    for side, label in (("fwd", "forward  (utag-fwd + forward primer)"), ("rev", "reverse  (utag-rev + reverse primer)")):
-        L = ups[side]
-        print(f"\n  {style(label, 'bold')}  {style(fmt_int(len(L)) + ' hits', 'green' if len(L) >= 10 else 'red')}")
+    print_info(f"upstream aligned (indels allowed) to the known adapters, ending at the utag "
+               f"(up to {fmt_int(a.n_align)} hits per read end)")
+    dists = {}                   # where -> context -> [suffix_edits per hit]
+    for where, label in (("start", "read start  (utag + primer on the read)"),
+                         ("end", "read end  (utag + primer on the reverse complement)")):
+        L = ups[where]
+        n_side = ", ".join(f"{k} {fmt_int(v)}" for k, v in sorted(sides[where].items()))
+        print(f"\n  {style(label, 'bold')}  {style(fmt_int(len(L)) + ' hits', 'green' if len(L) >= 10 else 'red')}"
+              + style(f"  ({n_side})" if n_side else "", "gray"))
         if len(L) < 10:
             print_note("too few hits: check --primer-f/--primer-r, the tag file and the sample sheet")
             continue
+        S = L[:a.n_align]
+        pc = lambda n: style(f"{100 * n / len(S):5.1f}%", pct_color(100 * n / len(S)))
+        D = dists[where] = {ctx: [suffix_edits(seq, u) for u in S] for ctx, _, seq, _ in KNOWN_CONTEXTS}
+        # 1. which known adapter is there: the whole adapter within ~15% edits
+        rows = []
+        for ctx, name, seq, _ in KNOWN_CONTEXTS:
+            full = [d[-1] for d in D[ctx]]
+            k = present_edits(len(seq))
+            rows.append([style(ctx, "cyan"), name, str(len(seq)), pc(sum(e == 0 for e in full)),
+                         *(pc(sum(e <= m for e in full)) for m in (1, 2, 3)), f"{pc(sum(e <= k for e in full))} (<= {k})"])
+        print_table(["-c", "adapter 5' of the utag", "nt", "exact", "<=1", "<=2", "<=3 edits", "present"],
+                    rows, "<<>>>>>>", indent=4)
+        # 2. for the adapter that fits best: how much of it is readable (suffixes ending at the utag)
+        ctx, name, seq, qlen = max(KNOWN_CONTEXTS, key=lambda c: sum(context_ok(D[c[0]], len(c[2]))))
+        if sum(context_ok(D[ctx], len(seq))) >= 0.3 * len(S) or sum(context_ok(D[ctx], 6)) >= 0.5 * len(S):
+            print(f"\n    {style(ctx, 'cyan')} adapter, last n nt before the utag:")
+            rows = []
+            for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
+                note = "  (-c " + ctx + ")" if n == qlen else "  (whole)" if n == len(seq) else ""
+                rows.append([f"last {n}{note}", color_seq(seq[-n:]),
+                             *(pc(sum(d[n] <= m for d in D[ctx])) for m in (0, 1, 2, 3))])
+            print_table(["suffix", "sequence", "exact", "<=1", "<=2", "<=3 edits"], rows, "<<>>>>", indent=4)
+        # 3. per-position consensus: shows sequence beyond the known adapters (unknown kits)
         cons, supp = [], []
         for pos in range(U):
             c = Counter(x[pos] for x in L if x[pos] != "-")
@@ -1233,14 +1306,84 @@ def cmd_context(a):
         while j > 0 and supp[j - 1] >= a.min_support:
             j -= 1
         top = Counter(x[-12:] for x in L).most_common(3)
+        print()
         print_kv([
             ("consensus", color_seq(cs) + "  " + style("<utag>", "bold", "magenta")),
             ("support", "".join(style(str(min(9, int(v // 10))), pct_color(v)) for v in supp)),
-            ("suggested --prefix", f"{color_seq(cs[j:]) if cs[j:] else '(none)'}  "
-                                   + style(f"({U - j} nt, every base >= {a.min_support:.0f}% support)", "gray")),
+            ("consensus prefix", f"{color_seq(cs[j:]) if cs[j:] else '(none)'}  "
+                                 + style(f"({U - j} nt >= {a.min_support:.0f}% at the same position; "
+                                         "indels and short read ends shorten it)", "gray")),
             ("most common 12 nt", "   ".join(f"{color_seq(k)} {style(SYM['times'] + str(v), 'gray')}" for k, v in top)),
         ], indent=4)
     print(style("\n  consensus '.' = no majority base; support digit = tens of % of hits (9 = 90-100%)", "gray"))
+    if dists:
+        context_verdict(dists, ups, a.n_align)
+
+
+def context_ok(D, n):
+    """per hit: the last n nt of the adapter are there (within ~15% edits)"""
+    k = present_edits(n)
+    return [d[n] <= k for d in D]
+
+
+def context_verdict(dists, ups, n_align):
+    """Say which -c context the reads look like, whether its query fits at both read ends, and which ONT barcodes
+    are there for nbd / mab."""
+    print_step("context: suggestion")
+    frac = lambda where, ctx, n: sum(context_ok(dists[where][ctx], n)) / len(dists[where][ctx])
+    # the kit is decided at the read start (full adapter there); fall back to the read end
+    where0 = "start" if "start" in dists else "end"
+    ctx, name, seq, qlen = max(KNOWN_CONTEXTS, key=lambda c: frac(where0, c[0], len(c[2])))
+    f0 = frac(where0, ctx, len(seq))
+    if f0 < 0.3:
+        print_info(f"no known adapter directly 5' of the utag (best: {ctx}, {100 * f0:.0f}% at the read {where0}): "
+                   "the reads look trimmed (adapter/barcode removed) or the kit is unknown")
+        print_kv([("use", style("-c bare", "bold") + "  (or --prefix from the consensus above)")], indent=4)
+        return
+    print_ok(f"{name}: whole adapter at {100 * f0:.0f}% of the utags at the read {where0}  ->  kit context "
+             + style("-c " + ctx, "bold"))
+    # can the -c query (last qlen nt) be found at both read ends? the read end often stops inside the adapter
+    rows, longest = [], None
+    for n in sorted({n for n in (6, 8, 12, 16, qlen, len(seq)) if n <= len(seq)}):
+        fr = {w: frac(w, ctx, n) for w in dists}
+        rows.append([f"last {n}" + ("  (-c " + ctx + ")" if n == qlen else ""), color_seq(seq[-n:]),
+                     *(style(f"{100 * fr[w]:5.1f}%", pct_color(100 * fr[w])) if w in fr else "-" for w in ("start", "end"))])
+        if all(v >= 0.7 for v in fr.values()):
+            longest = n
+    print()
+    print_table(["adapter suffix", "sequence", "read start", "read end"], rows, "<<>>", indent=4)
+    print(style(f"    % of utag hits with that suffix within ~15% edits", "gray"))
+    q_ok = all(frac(w, ctx, qlen) >= 0.7 for w in dists)
+    use = f"utag demux -c {ctx}"
+    alt = None
+    if not q_ok and longest:
+        print_note(f"the far end of most reads stops inside the adapter: only the last {longest} nt are there, not the "
+                   f"{qlen} nt of the -c {ctx} query. barbell tolerates a partial flank, so -c {ctx} still works; "
+                   f"--prefix {seq[-longest:]} matches both ends and may assign slightly more reads")
+        alt = f"utag demux --prefix {seq[-longest:]}"
+    elif not q_ok:
+        print_note(f"even a short adapter suffix is missing at one read end: try -c bare (utag + primer only)")
+        use = "utag demux -c bare"
+    if ctx == "lsk":
+        print_kv([("use", style(use, "bold"))] + ([("or", alt)] if alt else []), indent=4)
+        return
+    # nbd / mab: which ONT barcodes are 5' of the flank (a subsample of the read starts where the flank is present)
+    seqs, flank, kit = (NB_SEQS, NB_REAR, "SQK-NBD114-96") if ctx == "nbd" else (MAB_SEQS, MAB_TOPO, "SQK-MAB114-24")
+    cand = [u for u in ups[where0][:n_align] if suffix_edits(flank, u)[-1] <= present_edits(len(flank))][:BARCODE_SAMPLE]
+    bc = best_barcode(seqs, cand, len(flank))
+    called = sum(v for k, v in bc.items() if k != "?")
+    top = [(k, v) for k, v in bc.most_common() if k != "?"][:6]
+    print_kv([("ONT barcodes", ", ".join(f"{k} {100 * v / len(cand):.0f}%" for k, v in top) or "none identified"),
+              ("", style(f"of {len(cand)} hits checked; {100 * bc['?'] / max(1, len(cand)):.0f}% unclear", "gray"))],
+             indent=4)
+    main = top[0] if top else None
+    if ctx == "mab":
+        use = f"utag twopass -k {kit}   (or utag demux -c mab --single-end)"
+    elif len(top) > 1 and main[1] < 0.8 * called:
+        use = f"utag twopass -k {kit}   (several NB barcodes)"
+    elif main and q_ok:
+        use = f"utag demux -c nbd --ont-barcode {main[0]}   (or plain -c nbd)"
+    print_kv([("use", style(use, "bold"))], indent=4)
 
 
 def cmd_queries(a):
@@ -1469,12 +1612,13 @@ def main():
     t2.add_argument("--gzip", action="store_true")
     t2.set_defaults(fn=cmd_twopass)
 
-    cx = sp.add_parser("context", epilog=INPUT_HELP, formatter_class=raw, help="find the real kit context: consensus upstream of the utags in your reads")
+    cx = sp.add_parser("context", epilog=INPUT_HELP, formatter_class=raw, help="find the real kit context: align the sequence upstream of the utags to the known adapters")
     common(cx)
     cx.add_argument("-r", "--reads", nargs="+", required=True)
     cx.add_argument("-n", "--n-reads", type=int, default=20000, help="reads to scan (default 20000)")
     cx.add_argument("--upstream", type=int, default=50, help="nt upstream of the utag to report (default 50)")
-    cx.add_argument("--min-support", type=float, default=60, help="%% of hits needed per base for the suggested prefix (default 60)")
+    cx.add_argument("--n-align", type=int, default=2000, help="hits per read end aligned to the known adapters (default 2000)")
+    cx.add_argument("--min-support", type=float, default=60, help="%% of hits needed per base for the consensus prefix (default 60)")
     cx.set_defaults(fn=cmd_context)
 
     t = sp.add_parser("tagqc", epilog=INPUT_HELP, formatter_class=raw, help="check the tag set, plate map layout and sample sheet coverage")

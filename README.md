@@ -3,7 +3,7 @@
 Demultiplexes combinatorial dual-index (CDI) or unique dual-index (UDI) amplicon libraries sequenced on Oxford Nanopore with
 [barbell](https://github.com/rickbeeloo/barbell). For CDI, each amplicon carries a utag + primer at both ends; the **pair** of utags
 (e.g. a 32 x 12 grid = 384 wells) identifies the sample. Works for NBD (native barcoding) and LSK (ligation) libraries and
-any primer pair (default 16S 27F / 1492R). See below for UDI with the MAB kit.
+any primer pair (default 16S 27F / 1492R, pass `--primer-f <SEQ> --primer-r <SEQ>` for other PCR primers). See below for UDI with the MAB kit.
 
 ### Quick start
 
@@ -29,11 +29,11 @@ utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet sample
 utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
 ```
 
-`-r` takes files, globs (quote them so the script expands them; `**` recurses) or directories (searched recursively for
+`-r` takes files, globs or directories (searched recursively for
 `.fastq/.fq[.gz]`). `-h` on any subcommand lists its options and the input file formats.
 
 ### Choosing the command and context
-Diagrams of every context: https://angelovangel.github.io/utag/
+Diagrams of amplicon ONT libraries, utag contexts, and use cases: https://angelovangel.github.io/utag/
 
 ```
 5'-[ONT context][utag-fwd][forward primer] ...insert... [reverse primer][utag-rev][ONT context]-3'
@@ -49,12 +49,12 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
 | `mab` | SQK-MAB114-24 reads not split by `barbell kit` (`twopass` uses `bare` in pass 2) | `GCCCTT` (end of the TOPO site after the AB barcode) |
 | `bare` (default) | Reads whose ONT adapter/barcode is already trimmed (`twopass` uses this in pass 2) | nothing |
 
-* **`demux`**: utags are the only sample identifier (no ONT barcodes, or one per library).
+* **`demux`**: utags are the only sample identifier (no ONT barcodes, or after demux on ONT barcodes with e.g. dorado or barbell).
 * **`twopass`**: several ONT barcodes in one run (e.g. NB01-NB04). Pass 1 `barbell kit` splits by ONT barcode and trims it;
   pass 2 runs `demux -c bare` inside each bin, so the same utag pair can be reused in different bins.
 * Don't use `-c nbd` for LSK libraries. MAB kits can't use a tag *pair* (the utag at the
   read end is low quality/trimmed); use them as unique dual indexes, see below.
-* If unsure what is really upstream of your utag, run `context` (see Troubleshooting) and pass its suggestion as `--prefix`.
+* If unsure what is really upstream of your utag, run `utag context` (see Troubleshooting) and pass its suggestion as `--prefix`.
 
 ### NBD: combinatorial dual indexes
 
@@ -62,7 +62,7 @@ The native barcode is ligated to both amplicon ends, so every read carries a uta
 names the well. Reads come from either strand (`Ftag ... Rtag(rc)` or `Rtag ... Ftag(rc)`):
 
 ```
-                      ┌─── twopass pass 1: barbell kit ───┐┌─────────────┐ pass 2: bare
+                      ┌─── twopass pass 1: barbell kit ───┐┌─────────────┐ pass 2: -c bare
 5'-[native adapter ..][ATTGCTAAGGTTAA][NB01-NB96][CAGCACCT][utag-fwd][27F] ...insert... -3'
                       └──── -c nbd --ont-barcode NBxx ────┘└─────────────┘ utag + primer
                                                  └ -c nbd ┘
@@ -77,8 +77,8 @@ primer (`bare`) inside each bin, so the same utag pair can be reused across NB b
 
 ### LSK: combinatorial dual indexes
 
-No ONT barcode: the Ligation Adapter is ligated straight onto the dA-tailed amplicon (its 3' T pairs with the dA tail), at
-both ends. As for NBD, the utag **pair** determines the well and reads come from either strand:
+No ONT barcode: the Ligation Adapter is ligated straight onto the dA-tailed amplicon, at
+both ends. As for NBD, the utag **pair** determines the well and reads can come from either strand:
 
 ```
    ┌────── Ligation Adapter ──────┐
@@ -94,10 +94,11 @@ Read starts are often miscalled, so `-c lsk` uses only the last 22 nt of the ada
 
 With SQK-MAB114-24 the AB barcode attaches by chance to either amplicon end, and the read always starts at it, so a read starts
 with the fwd **or** the rev utag; with unique dual indexes **either** tag determines the sample. The sample is **AB barcode + the utag
-at the read start**; the far read end (low quality/truncated) is not used. The utag follows the TOPO site directly:
+at the read start**; the far read end (low quality/truncated) is not used. Here `--single-end` is used - one utag at the read start (fwd or rev) determines which sample.
+The utag follows the TOPO site directly:
 
 ```
-                     ┌── twopass pass 1: barbell kit ──┐        ┌─── pass 2: bare --single-end ────┐
+                     ┌── twopass pass 1: barbell kit ──┐        ┌── pass 2: -c bare --single-end ──┐
 5'-[rapid adapter ..][TTTAACC][AB01-AB24][CCATATCCGTGTC][GCCCTT][utag-fwd or utag-rev][27F or 1492R] ...insert... -3'
                                                         └──────┘ -c mab
                                                                 └───────── utag + primer ──────────┘
@@ -105,7 +106,7 @@ at the read start**; the far read end (low quality/truncated) is not used. The u
 
 The AB barcode is attached by TOPO (`CCCTT` is the vaccinia TOPO site). Pass 1 uses barbell's built-in MAB kit (flanks
 `TTTAACC` / `CCATATCCGTGTC`); its trim leaves `GCCCTT` and sometimes cuts into it, so pass 2 searches utag + primer with no
-prefix (`bare`). `twopass -k SQK-MAB*` switches on `--single-end` by itself. For untrimmed reads, `demux -c mab` puts `GCCCTT`
+prefix (`bare`). `utag twopass -k SQK-MAB*` switches on `--single-end` in pass2 by itself. For untrimmed reads, `demux -c mab` puts `GCCCTT`
 before the utag.
 
 * **Plate map** `data/mab-udi-platemap.csv` (`plate,well,ont-barcode,utag-fwd,utag-rev`): 3 plates; rows A-H = AB01-AB08 on
@@ -229,12 +230,15 @@ twopass_out/
 * **Mostly primer-flank only / few hits:** wrong primers or wrong context.
 * **Other primers** (ITS, COI, 18S, ...): give both 5'->3' as ordered, IUPAC allowed: `--primer-f <SEQ> --primer-r <SEQ>`
   (`demux`, `twopass`, `queries`, `context`). The primer is part of the flank and is trimmed from the output.
-* **Wrong context:** `context` finds exact utag + primer matches and prints the consensus of the sequence upstream, plus a
-  ready-to-use prefix. On real NB94 reads it returned adapter tail + `AAGGTTAA` + NB94 + `CAGCACCT`, the documented NBD layout.
+* **Wrong context:** `context` finds exact utag + primer matches and aligns the sequence upstream (indels allowed) to the
+  known adapters (LSK Ligation Adapter, NB rear, MAB TOPO site), separately for read starts and read ends. It reports how
+  much of each adapter is there (% within k edits), which `-c` context fits, the NB/AB barcodes for NBD/MAB, and the command
+  to use. A per-position consensus is printed too, for unknown kits. On real LSK reads the whole adapter is at the read start,
+  but the read end stops inside it (only the last ~6 nt), which is due to how ONT works (there is some distance between the motor and the reader).
 
   ```bash
   utag context -r reads.fastq.gz
-  utag demux -r reads.fastq.gz -c bare --prefix <suggested prefix> ...
+  utag demux -r reads.fastq.gz -c <suggested context> ...   # or -c bare --prefix <seq> for unknown kits
   ```
 * Tuning: `--flank-max-errors N` (relax if reads are missed), `--min-score-diff X` (raise, e.g. 0.2, for fewer wrong-well calls),
   `--max-offset 250` (max distance of the utag from the read end).
