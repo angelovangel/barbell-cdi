@@ -508,10 +508,12 @@ def tag_rows(a, layout):
         print_note(f"plate map {a.plates} unreadable ({e}): no decoy tags are searched")
         return layout
     used = {(r["utag-fwd"], r["utag-rev"]) for r in layout}
-    n_fwd = len({r["utag-fwd"] for r in design} - {r["utag-fwd"] for r in layout})
-    n_rev = len({r["utag-rev"] for r in design} - {r["utag-rev"] for r in layout})
-    print_info(f"decoys from {os.path.basename(a.plates)}: {n_fwd} fwd + {n_rev} rev tags not in the sample sheet; "
-               f"{sum(1 for r in design if (r['utag-fwd'], r['utag-rev']) not in used)} tag pairs can be reported as unexpected")
+    fwd = {r["utag-fwd"] for r in design} - {r["utag-fwd"] for r in layout}
+    rev = {r["utag-rev"] for r in design} - {r["utag-rev"] for r in layout}
+    pairs = {(r["utag-fwd"], r["utag-rev"]) for r in design} - used
+    a.decoys = dict(fwd=fwd, rev=rev, pairs=pairs)      # for run_summary.csv
+    print_info(f"decoys from {os.path.basename(a.plates)}: {len(fwd)} fwd + {len(rev)} rev tags not in the sample sheet; "
+               f"{len(pairs)} tag pairs can be reported as unexpected")
     return layout + design
 
 
@@ -984,7 +986,8 @@ def cmd_demux(a):
              ("wells_expected", len(plates)),
              ("unexpected_or_unparsed_files", len(unexpected))]
     unexp_tsv = os.path.join(out, "unexpected.tsv")
-    n_unexp = 0
+    n_unexp = n_decoy = 0
+    dec = getattr(a, "decoys", None) or dict(fwd=set(), rev=set(), pairs=set())
     with open(unexp_tsv, "w") as fh:          # tag pairs found on reads but not in the sample list
         fh.write("file\tutag_fwd\tutag_rev\treads\n")
         for f in unexpected:
@@ -996,8 +999,13 @@ def cmd_demux(a):
             pair = pair or ("", "")
             n = count_fastq_reads(f)
             n_unexp += n
+            if (pair[0] in dec["fwd"] or pair[1] in dec["rev"]) if single else pair in dec["pairs"]:
+                n_decoy += n                  # a plate-map well that is not in the sample sheet
             fh.write(f"barbell/trimmed/{os.path.basename(f)}\t{pair[0]}\t{pair[1]}\t{n}\n")
-    stats.append(("unexpected_reads", n_unexp))
+    stats += [("decoy_tags_fwd", len(dec["fwd"])), ("decoy_tags_rev", len(dec["rev"])), ("decoy_wells", len(dec["pairs"])),
+              ("unexpected_reads", n_unexp),
+              ("unexpected_reads_decoy_wells", n_decoy),
+              ("unexpected_reads_other", n_unexp - n_decoy)]
     run_csv = os.path.join(out, "run_summary.csv")
     with open(run_csv, "w", newline="") as fh:
         w = csv.writer(fh, lineterminator="\n")
@@ -1076,6 +1084,7 @@ def cmd_twopass(a):
     if skipped:
         print_note(f"no samples listed for bin(s) {', '.join(skipped)}: skipped in pass 2")
     stats, per_sample, per_unexp = [], [], []
+    unexp_tot = Counter()
     for b, f in bins.items():
         if not bin_rows[b]:
             continue
@@ -1107,6 +1116,8 @@ def cmd_twopass(a):
         m = {k: v for k, v, *_ in csv.reader(open(os.path.join(bdir, "run_summary.csv")))}
         stats.append((b, int(m["total_reads"]), int(m["reads_with_ge1_tag_or_flank_hit"]),
                       int(m["reads_assigned_to_wells"]), int(m["wells_with_reads"]), len(bin_rows[b])))
+        for k in ("unexpected_reads", "unexpected_reads_decoy_wells", "unexpected_reads_other"):
+            unexp_tot[k] += int(m.get(k, 0))
         # final layout: samples/<ONT bin>/<sample>.fastq
         dest = os.path.join(out, "samples", b)
         os.makedirs(dest, exist_ok=True)
@@ -1144,12 +1155,13 @@ def cmd_twopass(a):
               ("reads_assigned_to_samples", sum(st[3] for st in stats)),
               ("ont_bins_found", len(bins)), ("ont_bins_processed", len(stats)),
               ("samples_with_reads", sum(st[4] for st in stats)),
-              ("samples_expected", sum(st[5] for st in stats))]
+              ("samples_expected", sum(st[5] for st in stats))] + \
+             [(k, unexp_tot[k]) for k in ("unexpected_reads", "unexpected_reads_decoy_wells", "unexpected_reads_other")]
     with open(os.path.join(out, "run_summary.csv"), "w", newline="") as fh:
         w = csv.writer(fh, lineterminator="\n")
         w.writerow(["metric", "value", "pct_of_total_reads"])
         for k, v in totals:
-            w.writerow([k, v, f"{100 * v / n_total:.2f}" if n_total and k.startswith("reads") or k == "total_reads" else ""])
+            w.writerow([k, v, f"{100 * v / n_total:.2f}" if n_total and (k.startswith(("reads", "unexpected_reads")) or k == "total_reads") else ""])
     print_step("two-pass summary")
     print_summary(totals, n_total)
     print()

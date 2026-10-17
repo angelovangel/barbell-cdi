@@ -180,7 +180,8 @@ demux_out/
   samples/<sample>.fastq[.gz]   the result: one file per sample, utag and primer trimmed off
   summary.tsv                   reads per sample with plate, well and tags (0-read samples too); input for plate-heatmap.py
   unexpected.tsv                tag pairs found on reads but not in the plate map / sample sheet, with read counts
-  run_summary.csv               totals (also printed): reads in, with a hit, assigned, tag at both / one end, unexpected
+  run_summary.csv               totals (also printed): reads in, with a hit, assigned, tag at both / one end, decoys,
+                                unexpected (in decoy wells / other tag pairs)
   barbell-cdi.log               everything the script printed, with date and command line
   barbell/
     inspect.txt                 most common read patterns
