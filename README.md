@@ -33,6 +33,7 @@ utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet sample
 `.fastq/.fq[.gz]`). `-h` on any subcommand lists its options and the input file formats.
 
 ### Choosing the command and context
+Diagrams of every context: https://angelovangel.github.io/utag/
 
 ```
 5'-[ONT context][utag-fwd][forward primer] ...insert... [reverse primer][utag-rev][ONT context]-3'
