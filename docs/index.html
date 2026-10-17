@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>utag read layouts</title>
+<meta name="description" content="Read layouts and barbell search flanks for every utag context: bare, nbd, lsk, mab, and twopass.">
+<style>
+:root {
+  color-scheme: light;
+  --bg: #fbfaf8; --fg: #1d1d1b; --muted: #6b6a66; --line: #e4e1da; --card: #ffffff;
+  --adapter: #8a867d; --ont: #7a4fc9; --const: #b07a00; --utag: #1f6fb2; --utagr: #c8402f;
+  --primer: #22884a; --insert: #b5b1a8;
+  --span-search: #1f6fb2; --span-p1: #7a4fc9; --span-p2: #22884a; --span-alt: #b4690e;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+main { max-width: 1080px; margin: 0 auto; padding: 32px 16px 64px; }
+h1 { font-size: 26px; margin: 0 0 4px; letter-spacing: -0.01em; }
+h2 { font-size: 17px; margin: 0; }
+p { margin: 6px 0; }
+.lede { color: var(--muted); max-width: 75ch; }
+.lede b, .lede code { color: var(--fg); }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+a { color: var(--span-search); }
+
+nav { display: flex; flex-wrap: wrap; gap: 6px; margin: 16px 0 6px; }
+nav a {
+  text-decoration: none; color: var(--fg); border: 1px solid var(--line); background: var(--card);
+  padding: 2px 10px; border-radius: 999px; font-size: 13px;
+}
+nav a:hover { border-color: var(--muted); }
+
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin: 12px 0 4px; font-size: 13px; color: var(--muted); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 16px; height: 7px; border-radius: 2px; display: inline-block; }
+
+section.card {
+  background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+  padding: 14px 16px 10px; margin: 14px 0;
+}
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; }
+.cmd code { color: var(--muted); font-size: 12.5px; }
+.scroll { overflow-x: auto; margin: 10px 0 4px; padding-bottom: 4px; }
+.scheme { display: grid; column-gap: 0; row-gap: 2px; min-width: max-content; align-items: end; }
+.end { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: var(--muted); grid-row: 2; padding: 0 5px; }
+.lab { font-size: 10.5px; line-height: 1.2; text-align: center; white-space: nowrap; padding: 0 3px; font-weight: 600; }
+.seq {
+  font-family: ui-monospace, Menlo, monospace; font-size: 11px; text-align: center; white-space: nowrap; letter-spacing: -0.02em;
+  padding: 1px 2px 3px; border-bottom: 7px solid currentColor; font-weight: 600;
+}
+.adapter { color: var(--adapter); }
+.ont { color: var(--ont); }
+.const { color: var(--const); }
+.utag { color: var(--utag); }
+.utagr { color: var(--utagr); }
+.primer { color: var(--primer); }
+.insert { color: var(--insert); }
+.seq.insert { border-bottom-style: dotted; font-weight: 400; }
+.seq.off { opacity: .45; }
+.span { position: relative; padding-top: 11px; margin-top: 4px; text-align: center; font-size: 11.5px; line-height: 1.25; }
+.span::before {
+  content: ""; position: absolute; left: 2px; right: 2px; top: 0; height: 7px;
+  border: 2px solid currentColor; border-top: none; border-radius: 0 0 4px 4px;
+}
+.span span { color: var(--fg); }
+.span strong { font-family: ui-monospace, Menlo, monospace; font-weight: 600; }
+.s-search { color: var(--span-search); }
+.s-p1 { color: var(--span-p1); }
+.s-p2 { color: var(--span-p2); }
+.s-alt { color: var(--span-alt); }
+.notes { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 13px; }
+.notes li { margin: 2px 0; }
+.notes code, .notes b { color: var(--fg); }
+
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; margin-top: 8px; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.tablewrap { overflow-x: auto; }
+footer { color: var(--muted); font-size: 13px; margin-top: 28px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>utag read layouts</h1>
+  <nav id="toc"></nav>
+
+  <div class="legend">
+    <span><i style="background:var(--adapter)"></i>ONT adapter</span>
+    <span><i style="background:var(--ont)"></i>ONT barcode (NB / AB)</span>
+    <span><i style="background:var(--const)"></i>constant context</span>
+    <span><i style="background:var(--utag)"></i>utag-fwd</span>
+    <span><i style="background:var(--utagr)"></i>utag-rev</span>
+    <span><i style="background:var(--primer)"></i>primer</span>
+    <span><i style="background:var(--insert)"></i>insert</span>
+  </div>
+
+  <div id="schemes"></div>
+
+  <section class="card" id="table">
+    <h2>Context summary</h2>
+    <div class="tablewrap">
+    <table>
+      <thead><tr><th><code>-c</code></th><th>Use for</th><th>Sequence 5′ of the utag</th></tr></thead>
+      <tbody>
+        <tr><td><code>bare</code> (default)</td><td>Reads whose ONT adapter/barcode is already trimmed; <code>twopass</code> pass 2</td><td>nothing</td></tr>
+        <tr><td><code>nbd</code></td><td>SQK-NBD114</td><td><code>CAGCACCT</code>; with <code>--ont-barcode NBxx</code>: <code>ATTGCTAAGGTTAA</code> + NBxx + <code>CAGCACCT</code></td></tr>
+        <tr><td><code>lsk</code></td><td>SQK-LSK114, no ONT barcode</td><td><code>CTTCGTTCAGTTACGTATTGCT</code> (last 22 nt of the Ligation Adapter)</td></tr>
+        <tr><td><code>mab</code></td><td>SQK-MAB114-24 reads not split by <code>barbell kit</code></td><td><code>GCCCTT</code> (end of the TOPO site)</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <footer>From the <a href="https://github.com/angelovangel/utag">utag</a> README. Demultiplexing with
+    <a href="https://github.com/rickbeeloo/barbell">barbell</a>. Default primers 16S 27F <code>AGRGTTYGATYMTGGCTCAG</code> /
+    1492R <code>RGYTACCTTGTTACGACTT</code>.</footer>
+</main>
+
+<script>
+// A segment is [kind, label, seq]; on the read end, seqs made of bases are reverse-complemented.
+const P27F = ["primer", "27F", "AGRGTTYGATYMTGGCTCAG"];
+const P1492R = ["primer", "1492R", "RGYTACCTTGTTACGACTT"];
+const UF9 = ["utag", "utag-fwd", "NNNNNNNNN"], UR9 = ["utagr", "utag-rev", "NNNNNNNNN"];
+const NBD = [["adapter", "adapter", "…"], ["const", "tail", "ATTGCTAAGGTTAA"], ["ont", "NB01–96", "NBxx"], ["const", "rear", "CAGCACCT"]];
+const LSK = [["adapter", "LA", "CCTGTA"], ["adapter", "Ligation Adapter, last 22 nt", "CTTCGTTCAGTTACGTATTGCT"]];
+const MAB = [["adapter", "adapter", "…"], ["const", "flank", "TTTAACC"], ["ont", "AB01–24", "ABxx"],
+             ["const", "TOPO", "CCATATCCGTGTC"], ["const", "TOPO end", "GCCCTT"]];
+const MAB_TAG = ["utag", "utag-fwd or -rev", "NNNNNNNNNN"];
+const MAB_PRIMER = ["primer", "27F or 1492R", "primer"];
+
+// spans: [first, last, class, label, sub], indices into ctx + [utag, primer]; "cdi" schemes mirror them on the read end.
+const schemes = [
+  { id: "bare", title: "bare — trimmed reads", cmd: "utag demux -c bare  (default; twopass pass 2)", ctx: [],
+    spans: [[0, 1, "s-search", "-c bare", "utag + primer"]],
+    notes: ["Use when the ONT adapter/barcode was already removed (basecaller or <code>barbell kit</code>)."] },
+  { id: "nbd", title: "nbd — SQK-NBD114, one library", cmd: "utag demux -c nbd [--ont-barcode NB07]", ctx: NBD,
+    spans: [[3, 5, "s-search", "-c nbd", "any NB"], [1, 5, "s-alt", "--ont-barcode NBxx", "one NB, more specific"]],
+    notes: ["<code>CAGCACCT</code> follows every NB barcode, so plain <code>-c nbd</code> works on reads of any NB barcode.",
+            "Don't use <code>-c nbd</code> for LSK libraries."] },
+  { id: "twopass-nbd", nav: "twopass NBD", title: "twopass — several NB barcodes in one run", cmd: "utag twopass -k SQK-NBD114-96", ctx: NBD,
+    spans: [[1, 3, "s-p1", "pass 1", "barbell kit"], [4, 5, "s-p2", "pass 2", "-c bare, per bin"]],
+    notes: ["Pass 1 splits by NB barcode and trims it; pass 2 runs <code>demux -c bare</code> in each bin, so utag pairs can be reused across bins."] },
+  { id: "lsk", title: "lsk — SQK-LSK114, no ONT barcode", cmd: "utag demux -c lsk", ctx: LSK,
+    spans: [[1, 3, "s-search", "-c lsk", "adapter tail + utag + primer"]],
+    notes: ["Read starts are often miscalled, so only the last 22 nt of the Ligation Adapter are used."] },
+  { id: "mab", title: "mab — SQK-MAB114-24, untrimmed reads", cmd: "utag demux -c mab --single-end", ctx: MAB, udi: true,
+    spans: [[4, 6, "s-search", "-c mab", "GCCCTT + utag + primer"]],
+    notes: ["The AB barcode attaches to either amplicon end, so the read starts with utag-fwd + 27F <b>or</b> utag-rev + 1492R.",
+            "Unique dual indexes: sample = AB barcode + the utag at the read start; the far end is not used."] },
+  { id: "twopass-mab", nav: "twopass MAB", title: "twopass — MAB unique dual indexes", cmd: "utag twopass -k SQK-MAB114-24  (24 AB × 12 utags)", ctx: MAB, udi: true,
+    spans: [[1, 3, "s-p1", "pass 1", "barbell kit"], [5, 6, "s-p2", "pass 2", "-c bare --single-end"]],
+    notes: ["barbell's trim leaves <code>GCCCTT</code> and sometimes cuts into it, so pass 2 uses no prefix (<code>bare</code>)."] },
+];
+
+const COMP = { A: "T", C: "G", G: "C", T: "A", R: "Y", Y: "R", K: "M", M: "K", S: "S", W: "W", B: "V", V: "B", D: "H", H: "D", N: "N" };
+const isSeq = s => /^[ACGTRYKMSWBDHVN]+$/.test(s);
+const rc = s => s.split("").reverse().map(c => COMP[c]).join("");
+const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+const toc = document.getElementById("toc");
+const root = document.getElementById("schemes");
+for (const sc of schemes) {
+  toc.insertAdjacentHTML("beforeend", `<a href="#${sc.id}">${esc(sc.nav || sc.id)}</a>`);
+  let segs, spans;
+  if (sc.udi) {
+    segs = [...sc.ctx, MAB_TAG, MAB_PRIMER, ["insert", "insert", "·····"], ["insert off", "far end, not used", "···"]];
+    spans = sc.spans.map(s => [...s, 0]);
+  } else {
+    const fwd = [...sc.ctx, UF9, P27F];
+    const rev = [...sc.ctx, UR9, P1492R].reverse().map(([k, l, s]) => [k, l, isSeq(s) ? rc(s) : s]);
+    const n = fwd.length;
+    segs = [...fwd, ["insert", "insert", "·····"], ...rev];
+    // span [a, b] at the start maps to [2n - b, 2n - a] at the end (after the insert)
+    spans = sc.spans.flatMap(([a, b, cls, label, sub], r) =>
+      [[a, b, cls, label, sub, r], [2 * n - b, 2 * n - a, cls, label, sub, r]]);
+  }
+  const m = segs.length;
+  let h = `<div class="scheme" style="grid-template-columns: auto repeat(${m}, auto) auto">`;
+  h += `<div class="end" style="grid-column:1">5′-</div>`;
+  segs.forEach(([kind, label, seq], i) => {
+    h += `<div class="lab ${kind}" style="grid-row:1;grid-column:${i + 2}">${esc(label)}</div>` +
+         `<div class="seq ${kind}" style="grid-row:2;grid-column:${i + 2}">${esc(seq)}</div>`;
+  });
+  h += `<div class="end" style="grid-column:${m + 2}">-3′</div>`;
+  spans.forEach(([a, b, cls, label, sub, r]) => {
+    h += `<div class="span ${cls}" style="grid-row:${r + 3};grid-column:${a + 2} / ${b + 3}">` +
+         `<span><strong>${esc(label)}</strong>${sub ? ` · ${esc(sub)}` : ""}</span></div>`;
+  });
+  h += `</div>`;
+  root.insertAdjacentHTML("beforeend",
+    `<section class="card" id="${sc.id}"><div class="head"><h2>${esc(sc.title)}</h2>` +
+    `<span class="cmd"><code>${esc(sc.cmd)}</code></span></div>` +
+    `<div class="scroll">${h}</div>` +
+    `<ul class="notes">${sc.notes.map(x => `<li>${x}</li>`).join("")}</ul></section>`);
+}
+toc.insertAdjacentHTML("beforeend", `<a href="#table">summary table</a>`);
+</script>
+</body>
+</html>
