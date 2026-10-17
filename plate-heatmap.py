@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plate-heatmap.py - plate heatmap of read counts per well, from the summary.tsv written by barbell-cdi.py.
+plate-heatmap.py - plate heatmap of read counts per well, from the summary.tsv written by utag.py.
 
     plate-heatmap.py demux_out/summary.tsv -o plates.html
     plate-heatmap.py twopass_out/summary.tsv --scale linear --per-plate
@@ -13,7 +13,7 @@ sidebar on the right.
 Input (tab or comma separated; extra columns are ignored):
     sample        e.g. Plate1-A1 (plate and well are read from names like Plate1-A1, P2_B12, A1)
     reads         read count
-    plate, well   where the sample sits (written by barbell-cdi.py, also for custom sample names)
+    plate, well   where the sample sits (written by utag.py, also for custom sample names)
     ont_barcode   optional (twopass): every ONT bin gets its own plates
     utag_fwd, utag_rev   optional, shown in the tooltip and as well labels (utags)
 
@@ -102,7 +102,7 @@ def build(rows, sample_map):
         plate, pos = None, None
         if sample in sample_map:
             plate, pos = sample_map[sample]
-        elif r.get("well") and parse_well(r["well"]):        # summary.tsv from barbell-cdi.py has plate,well
+        elif r.get("well") and parse_well(r["well"]):        # summary.tsv from utag.py has plate,well
             plate, pos = r.get("plate", ""), parse_well(r["well"])
         else:
             m = WELL_RE.match(sample)
@@ -145,8 +145,8 @@ def build(rows, sample_map):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Plate heatmap (HTML) of read counts per well from barbell-cdi summary.tsv")
-    ap.add_argument("summary", help="summary.tsv from barbell-cdi.py demux / twopass (tab or comma separated)")
+    ap = argparse.ArgumentParser(description="Plate heatmap (HTML) of read counts per well from utag summary.tsv")
+    ap.add_argument("summary", help="summary.tsv from utag.py demux / twopass (tab or comma separated)")
     ap.add_argument("-o", "--output", help="HTML file to write (default: plates.html next to the summary)")
     ap.add_argument("--title", help="page title (default: the summary's folder name)")
     ap.add_argument("--map", help="CSV/TSV with columns sample,well[,plate]; only needed for summaries without plate/well columns")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-barbell-cdi.py - barbell query FASTAs + automated demux for custom
-combinatorial dual-index (CDI) amplicon libraries on Oxford Nanopore.
+utag.py - barbell query FASTAs + automated demux for custom utag amplicon
+libraries on Oxford Nanopore: combinatorial (CDI) or unique (UDI) dual indexes.
 Any primer pair works (--primer-f / --primer-r); defaults are 16S 27F / 1492R.
 
 Library model (5'->3' of each tagged PCR primer):
@@ -1112,7 +1112,7 @@ def cmd_twopass(a):
         if r.returncode:
             for ln in (r.stdout + r.stderr).strip().splitlines()[-10:]:
                 print("    " + style(ln, "gray", err=True), file=sys.stderr)
-            sys.exit(f"pass 2 failed for {b}; see {rel(os.path.join(bdir, 'barbell-cdi.log'))}")
+            sys.exit(f"pass 2 failed for {b}; see {rel(os.path.join(bdir, 'utag.log'))}")
         m = {k: v for k, v, *_ in csv.reader(open(os.path.join(bdir, "run_summary.csv")))}
         stats.append((b, int(m["total_reads"]), int(m["reads_with_ge1_tag_or_flank_hit"]),
                       int(m["reads_assigned_to_wells"]), int(m["wells_with_reads"]), len(bin_rows[b])))
@@ -1385,7 +1385,7 @@ class Tee:
         return getattr(self.stream, name)
 
 
-def start_log(outdir, name="barbell-cdi.log"):
+def start_log(outdir, name="utag.log"):
     os.makedirs(outdir, exist_ok=True)
     path = os.path.join(outdir, name)
     log = open(path, "w", buffering=1)
@@ -1400,7 +1400,7 @@ def main():
     raw = argparse.RawDescriptionHelpFormatter
     ap = argparse.ArgumentParser(description=__doc__, epilog=INPUT_HELP, formatter_class=raw)
     sp = ap.add_subparsers(dest="cmd", required=True, title="subcommands", metavar="<subcommand>",
-                          description="run 'barbell-cdi.py <subcommand> -h' for its options")
+                          description="run 'utag.py <subcommand> -h' for its options")
 
     def common(p):
         p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
@@ -1492,7 +1492,7 @@ def main():
         a.tags = os.path.join(here, "data/utags-10bp-sequence.csv" if udi else "data/utags-sequence.csv")
     set_color(a.color)
     if getattr(a, "outdir", None) and a.cmd != "queries":
-        start_log(a.outdir)           # everything printed is also saved to <outdir>/barbell-cdi.log
+        start_log(a.outdir)           # everything printed is also saved to <outdir>/utag.log
     try:
         a.fn(a)
     except SystemExit as e:

@@ -1,4 +1,4 @@
-## barbell demux for custom CDI/UDI amplicon libraries (ONT)
+## utag: barbell demux for custom CDI/UDI amplicon libraries (ONT)
 
 Demultiplexes combinatorial dual-index (CDI) or unique dual-index (UDI) amplicon libraries sequenced on Oxford Nanopore with
 [barbell](https://github.com/rickbeeloo/barbell). For CDI, each amplicon carries a utag + primer at both ends; the **pair** of utags
@@ -8,25 +8,25 @@ any primer pair (default 16S 27F / 1492R). See below for UDI with the MAB kit.
 ### Quick start
 
 **Requirements:** Python >= 3.8 and `barbell` on your PATH
-(`RUSTFLAGS="-C target-cpu=native" cargo install barbell` or `conda install -c bioconda barbell`). Optional, to call it as `barbell-cdi`:
+(`RUSTFLAGS="-C target-cpu=native" cargo install barbell` or `conda install -c bioconda barbell`). Optional, to call it as `utag`:
 
 ```bash
-chmod +x barbell-cdi.py && ln -s "$(pwd)/barbell-cdi.py" /usr/local/bin/barbell-cdi
+chmod +x utag.py && ln -s "$(pwd)/utag.py" /usr/local/bin/utag
 ```
 
 ```bash
 # all 384 wells, output named Plate1-A1.fastq ...
-barbell-cdi demux -r 'fastq_pass/**/*.fastq.gz' -c nbd -o demux_out -t 16
+utag demux -r 'fastq_pass/**/*.fastq.gz' -c nbd -o demux_out -t 16
 
 # your own sample names / a subset of wells
-barbell-cdi demux -r 'fastq_pass/**/*.fastq.gz' -c nbd --samplesheet samples.csv -o demux_out -t 16
+utag demux -r 'fastq_pass/**/*.fastq.gz' -c nbd --samplesheet samples.csv -o demux_out -t 16
 
 # ONT barcodes also split the pool: ONT barcode first, then utags inside each bin
-barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out -t 16
+utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out -t 16
 
 # MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
 # (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv --tags data/utags-10bp-sequence.csv)
-barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
+utag twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
 ```
 
 `-r` takes files, globs (quote them so the script expands them; `**` recurses) or directories (searched recursively for
@@ -182,7 +182,7 @@ demux_out/
   unexpected.tsv                tag pairs found on reads but not in the plate map / sample sheet, with read counts
   run_summary.csv               totals (also printed): reads in, with a hit, assigned, tag at both / one end, decoys,
                                 unexpected (in decoy wells / other tag pairs)
-  barbell-cdi.log               everything the script printed, with date and command line
+  utag.log               everything the script printed, with date and command line
   barbell/
     inspect.txt                 most common read patterns
     trimmed/                    per-tag-pair files (below)
@@ -206,7 +206,7 @@ twopass_out/
   samples/<ONT bin>/<sample>.fastq
   summary.tsv, unexpected.tsv   as above, with an ont_barcode column
   ont_bins.tsv                  reads per ONT bin: in bin, with hit, assigned
-  run_summary.csv, barbell-cdi.log
+  run_summary.csv, utag.log
   barbell/
     pass1_kit/, pass1_kit.log   barbell kit output (reads per ONT bin)
     pass2_utag/<bin>/           the demux run of each bin (its own log, summaries and barbell/ folder)
@@ -232,8 +232,8 @@ twopass_out/
   ready-to-use prefix. On real NB94 reads it returned adapter tail + `AAGGTTAA` + NB94 + `CAGCACCT`, the documented NBD layout.
 
   ```bash
-  barbell-cdi context -r reads.fastq.gz
-  barbell-cdi demux -r reads.fastq.gz -c bare --prefix <suggested prefix> ...
+  utag context -r reads.fastq.gz
+  utag demux -r reads.fastq.gz -c bare --prefix <suggested prefix> ...
   ```
 * Tuning: `--flank-max-errors N` (relax if reads are missed), `--min-score-diff X` (raise, e.g. 0.2, for fewer wrong-well calls),
   `--max-offset 250` (max distance of the utag from the read end).
@@ -263,7 +263,7 @@ two top patterns should be `Ftag ... Rtag(rc)` and `Rtag ... Ftag(rc)`) -> `filt
 
 | File | Description |
 |---|---|
-| `barbell-cdi.py` | The tool (`demux`, `twopass`, `context`, `queries`, `tagqc`) |
+| `utag.py` | The tool (`demux`, `twopass`, `context`, `queries`, `tagqc`) |
 | `data/utags-sequence.csv`, `data/utags-platemap.csv` | Default tags and plate map |
 | `data/samplesheet-example.csv`, `data/samplesheet-example-twopass.csv` | Example sample sheets (the second with `ont-barcode`) |
 | `data/utags-10bp-sequence.csv`, `data/utags-10bp-platemap.csv` | An alternative 10 nt tag set (`U001`-`U044`) and its plate map (rows = rev, columns = fwd tags); use with `--tags` and `--plates` |

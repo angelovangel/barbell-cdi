@@ -6,7 +6,7 @@ utag-fwd + 27F or utag-rev + 1492R (the barcode attaches to either amplicon end)
 import os, random, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import importlib.util
-_spec = importlib.util.spec_from_file_location("barbell_cdi", os.path.join(os.path.dirname(os.path.abspath(__file__)), "barbell-cdi.py"))
+_spec = importlib.util.spec_from_file_location("utag", os.path.join(os.path.dirname(os.path.abspath(__file__)), "utag.py"))
 _m = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m)
 NB_SEQS, PRIMER_F, PRIMER_R, rc, read_tags, read_plates = _m.NB_SEQS, _m.PRIMER_F, _m.PRIMER_R, _m.rc, _m.read_tags, _m.read_plates
 MAB_SEQS, MAB_TOPO = _m.MAB_SEQS, _m.MAB_TOPO
