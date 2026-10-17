@@ -28,6 +28,10 @@ input file formats (defaults live in data/ next to this script):
                                             Soil_A,1,A1[,NB01]
                  (or sample,utag-fwd,utag-rev to give the tags directly)
 
+  --tags and --plates describe the oligos and stay the same; the sample sheet is
+  the only file you write. Soil_A,1,A1 -> plate 1 well A1 = U013 + U001 (plate map)
+  -> tag sequences (--tags) -> reads with that pair go to samples/Soil_A.fastq.
+
   No --samplesheet: every plate-map well is a sample (samples/Plate1-A1.fastq).
   With --samplesheet: only the listed samples are written (samples/Soil_A.fastq);
   the plate map's tags are still searched as decoys, so reads from unlisted wells
@@ -409,7 +413,9 @@ def design_index(design_rows):
     for r in design_rows:
         if r["well"]:
             by_pos[(plate_key(r["plate"]), r["well"])] = r
-            by_pair[(r["utag-fwd"], r["utag-rev"])] = (r["plate"], r["well"])
+            pair = (r["utag-fwd"], r["utag-rev"])
+            # a pair in several wells (MAB plate map: the same UDI in every AB bin) does not name one well
+            by_pair[pair] = ("", "") if pair in by_pair else (r["plate"], r["well"])
     return by_pos, by_pair
 
 
@@ -507,6 +513,18 @@ def tag_rows(a, layout):
     print_info(f"decoys from {os.path.basename(a.plates)}: {n_fwd} fwd + {n_rev} rev tags not in the sample sheet; "
                f"{sum(1 for r in design if (r['utag-fwd'], r['utag-rev']) not in used)} tag pairs can be reported as unexpected")
     return layout + design
+
+
+def udi_problem(rows):
+    """Single-end (MAB) demux sees one utag per read, so every tag must name exactly one sample. Returns an error text or None."""
+    n_tag = Counter(t for r in rows for t in {r["utag-fwd"], r["utag-rev"]})
+    dup = sorted((t for t, n in n_tag.items() if n > 1), key=lambda t: -n_tag[t])
+    if not dup:
+        return None
+    ex = ", ".join(f"{t} ({n_tag[t]} samples)" for t in dup[:3])
+    return (f"{len(dup)} tags are shared by several samples, e.g. {ex}. Only one utag is read per read, so this needs\n"
+            "unique dual indexes (each fwd and rev tag in one sample per ONT/AB barcode), e.g. --plates data/mab-udi-platemap.csv.\n"
+            "A combinatorial (CDI) plate map like data/utags-platemap.csv cannot be demultiplexed from one tag.")
 
 
 def edit_distance(a, b):
@@ -815,11 +833,9 @@ def cmd_demux(a):
     tags, plates = read_tags(a.tags), load_layout(a)
     single = a.single_end
     if single:              # unique dual indexes: the utag at the read start (fwd OR rev) names the sample on its own
-        n_tag = Counter(t for r in plates for t in {r["utag-fwd"], r["utag-rev"]})
-        dup = [t for t, n in n_tag.items() if n > 1]
-        if dup:
-            sys.exit(f"--single-end: tag(s) {', '.join(sorted(dup))} are used by more than one sample (or as both fwd and rev); "
-                     "a single tag must name one sample (unique dual indexes; split by ONT/AB barcode with twopass)")
+        err = udi_problem(plates)
+        if err:
+            sys.exit(f"--single-end: {err}")
         well_of = {(r[s],): r["plate-well"] for r in plates for s in ("utag-fwd", "utag-rev")}
     else:
         well_of = {(r["utag-fwd"], r["utag-rev"]): r["plate-well"] for r in plates}
@@ -1003,10 +1019,20 @@ def cmd_twopass(a):
     """Pass 1: barbell kit (ONT barcode). Pass 2: barbell utag demux inside every ONT bin."""
     reads = expand_reads(a.reads)
     barbell = shutil.which(a.barbell) or sys.exit(f"barbell not found ({a.barbell}); install it first")
-    rows = load_layout(a)
     mab = a.kit.upper().startswith("SQK-MAB")
+    if a.mab_defaults:
+        print_info(f"MAB kit: using the unique dual index design --plates {rel(a.plates)} --tags {rel(a.tags)}")
+    rows = load_layout(a)
     ctx2 = a.context or "bare"                          # pass 1 trimmed the ONT barcode and its flanks
     single = a.single_end or mab                        # MAB reads carry barcode + utag at the read start only
+    if single:                                          # check before the long pass 1, per ONT/AB bin
+        by_bin = defaultdict(list)
+        for r in rows:
+            by_bin[r["ont"]].append(r)
+        for b, rs in sorted(by_bin.items()):
+            err = udi_problem(rs)
+            if err:
+                sys.exit(f"--single-end{' (' + b + ')' if b else ''}: {err}")
     if mab:
         print_info("MAB kit: pass 2 searches one utag (fwd or rev) + primer at the read start; the far read end is not used")
     out = os.path.abspath(a.outdir)
@@ -1368,11 +1394,11 @@ def main():
         p.add_argument("--color", choices=["auto", "always", "never"], default="auto",
                        help="coloured output (default auto: only on a terminal; NO_COLOR / FORCE_COLOR are honoured)")
         g = p.add_argument_group("input files (formats and defaults: see the end of this help)")
-        g.add_argument("--tags", default=os.path.join(here, "data/utags-sequence.csv"), metavar="CSV",
-                       help="tag sequences")
-        g.add_argument("--plates", default=os.path.join(here, "data/utags-platemap.csv"), metavar="CSV",
-                       help="plate map (library design)")
-        g.add_argument("--samplesheet", metavar="CSV|XLSX", help="your sample names and wells")
+        g.add_argument("--tags", metavar="CSV",
+                       help="tag sequences (default: data/utags-sequence.csv; twopass -k SQK-MAB*: data/utags-10bp-sequence.csv)")
+        g.add_argument("--plates", metavar="CSV",
+                       help="plate map: the tags in each well (default: data/utags-platemap.csv; twopass -k SQK-MAB*: data/mab-udi-platemap.csv)")
+        g.add_argument("--samplesheet", metavar="CSV|XLSX", help="your sample names and wells (without it every plate-map well is a sample)")
         g.add_argument("--sheet-name", help="worksheet name for an .xlsx sample sheet (default: first sheet)")
         g.add_argument("--no-decoys", action="store_true", help="with --samplesheet: do not search the plate map tags as decoys")
         p.add_argument("--primer-f", help=f"forward primer 5'->3' (default: 16S 27F {PRIMER_F})")
@@ -1403,7 +1429,7 @@ def main():
     d.add_argument("-t", "--threads", type=int, default=10)
     d.add_argument("--barbell", default="barbell")
     d.add_argument("--flank-max-errors", type=int, help="relax if too many reads are missed (default: barbell decides)")
-    d.add_argument("--min-score-diff", type=float)
+    d.add_argument("--min-score-diff", type=float, help="min score difference between the best and second-best tag (default: barbell, 0.1); raise for fewer wrong-well calls")
     d.add_argument("--max-offset", type=int, default=250, help="max distance of utag from read end (default 250)")
     d.add_argument("--keep-merged", action="store_true", help="keep the decompressed/merged input FASTQ (deleted by default)")
     d.add_argument("--flip", dest="no_flip", action="store_false", default=True,
@@ -1424,7 +1450,7 @@ def main():
     t2.add_argument("--barbell", default="barbell")
     t2.add_argument("--no-maximize", action="store_true", help="pass 1 without --maximize")
     t2.add_argument("--flank-max-errors", type=int)
-    t2.add_argument("--min-score-diff", type=float)
+    t2.add_argument("--min-score-diff", type=float, help="min score difference between the best and second-best tag (default: barbell, 0.1); raise for fewer wrong-well calls")
     t2.add_argument("--max-offset", type=int, default=250)
     t2.add_argument("--flip", dest="no_flip", action="store_false", default=True,
                     help="reverse-complement reads into forward-primer -> reverse-primer orientation")
@@ -1444,6 +1470,14 @@ def main():
     t.set_defaults(fn=cmd_tagqc)
 
     a = ap.parse_args()
+    # defaults that depend on the library: a MAB kit is read from one tag, so it needs the unique dual index design
+    mab = a.cmd == "twopass" and a.kit.upper().startswith("SQK-MAB")
+    a.mab_defaults = mab and a.plates is None
+    if a.plates is None:
+        a.plates = os.path.join(here, "data/mab-udi-platemap.csv" if mab else "data/utags-platemap.csv")
+    if a.tags is None:
+        udi = os.path.basename(a.plates) == "mab-udi-platemap.csv"       # its tag IDs refer to the 10 nt set
+        a.tags = os.path.join(here, "data/utags-10bp-sequence.csv" if udi else "data/utags-sequence.csv")
     set_color(a.color)
     if getattr(a, "outdir", None) and a.cmd != "queries":
         start_log(a.outdir)           # everything printed is also saved to <outdir>/barbell-cdi.log

@@ -1,13 +1,13 @@
-## barbell demux for custom CDI amplicon libraries (ONT)
+## barbell demux for custom CDI/UDI amplicon libraries (ONT)
 
-Demultiplexes combinatorial dual-index (CDI) amplicon libraries sequenced on Oxford Nanopore with
-[barbell](https://github.com/rickbeeloo/barbell). Each amplicon carries a utag + primer at both ends; the **pair** of utags
+Demultiplexes combinatorial dual-index (CDI) or unique dual-index (UDI) amplicon libraries sequenced on Oxford Nanopore with
+[barbell](https://github.com/rickbeeloo/barbell). For CDI, each amplicon carries a utag + primer at both ends; the **pair** of utags
 (e.g. a 32 x 12 grid = 384 wells) identifies the sample. Works for NBD (native barcoding) and LSK (ligation) libraries and
-any primer pair (default 16S 27F / 1492R).
+any primer pair (default 16S 27F / 1492R). See below for UDI with the MAB kit.
 
 ### Quick start
 
-**Requirements:** Python >= 3.8 (stdlib only) and `barbell` on your PATH
+**Requirements:** Python >= 3.8 and `barbell` on your PATH
 (`RUSTFLAGS="-C target-cpu=native" cargo install barbell` or `conda install -c bioconda barbell`). Optional, to call it as `barbell-cdi`:
 
 ```bash
@@ -25,8 +25,8 @@ barbell-cdi demux -r 'fastq_pass/**/*.fastq.gz' -c nbd --samplesheet samples.csv
 barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-NBD114-96 --samplesheet samples.csv -o twopass_out -t 16
 
 # MAB unique dual indexes: 24 AB barcodes x 12 utags = 288 samples (see "MAB: unique dual indexes")
-barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --tags data/utags-10bp-sequence.csv \
-  --plates data/mab-udi-platemap.csv --samplesheet samples.csv -o mab_out -t 16
+# (-k SQK-MAB* defaults to --plates data/mab-udi-platemap.csv --tags data/utags-10bp-sequence.csv)
+barbell-cdi twopass -r 'fastq_pass/**/*.fastq.gz' -k SQK-MAB114-24 --samplesheet samples.csv -o mab_out -t 16
 ```
 
 `-r` takes files, globs (quote them so the script expands them; `**` recurses) or directories (searched recursively for
@@ -51,9 +51,9 @@ The "context" is the constant sequence directly 5' of the utag, which barbell us
 * **`demux`**: utags are the only sample identifier (no ONT barcodes, or one per library).
 * **`twopass`**: several ONT barcodes in one run (e.g. NB01-NB04). Pass 1 `barbell kit` splits by ONT barcode and trims it;
   pass 2 runs `demux -c bare` inside each bin, so the same utag pair can be reused in different bins.
-* Don't use `-c nbd` for LSK libraries (56% vs 93% assigned in simulation). MAB kits can't use a tag *pair* (the utag at the
-  read end is low quality/trimmed); use them as unique dual indexes, below.
-* Unsure what is really upstream of your utags? Run `context` (see Troubleshooting) and pass its suggestion as `--prefix`.
+* Don't use `-c nbd` for LSK libraries. MAB kits can't use a tag *pair* (the utag at the
+  read end is low quality/trimmed); use them as unique dual indexes, see below.
+* If unsure what is really upstream of your utag, run `context` (see Troubleshooting) and pass its suggestion as `--prefix`.
 
 ### NBD: combinatorial dual indexes
 
@@ -77,7 +77,7 @@ primer (`bare`) inside each bin, so the same utag pair can be reused across NB b
 ### LSK: combinatorial dual indexes
 
 No ONT barcode: the Ligation Adapter is ligated straight onto the dA-tailed amplicon (its 3' T pairs with the dA tail), at
-both ends. As for NBD, the utag pair names the well and reads come from either strand:
+both ends. As for NBD, the utag **pair** determines the well and reads come from either strand:
 
 ```
    ┌────── Ligation Adapter ──────┐
@@ -87,15 +87,13 @@ both ends. As for NBD, the utag pair names the well and reads come from either s
 
 The far read end is the same layout, reverse complemented, and is searched the same way.
 
-Read starts are often miscalled, so `-c lsk` uses only the last 22 nt of the adapter. Don't use `-c nbd` here (no `CAGCACCT`;
-56% vs 93% assigned in simulation).
+Read starts are often miscalled, so `-c lsk` uses only the last 22 nt of the adapter. Don't use `-c nbd` here.
 
 ### MAB: unique dual indexes
 
 With SQK-MAB114-24 the AB barcode attaches by chance to either amplicon end, and the read always starts at it, so a read starts
-with the fwd **or** the rev utag; with unique dual indexes either one names the sample. The sample is **AB barcode + the utag
-at the read start**; the far read end (low quality/truncated) is not used. The utag follows the TOPO site directly
-(checked on the real reads in `demo/mab`):
+with the fwd **or** the rev utag; with unique dual indexes **either** tag determines the sample. The sample is **AB barcode + the utag
+at the read start**; the far read end (low quality/truncated) is not used. The utag follows the TOPO site directly:
 
 ```
                      ┌── twopass pass 1: barbell kit ──┐        ┌─── pass 2: bare --single-end ────┐
@@ -115,10 +113,9 @@ before the utag.
   U005/U025. The 24 tags are >= 4 edits apart, fwd and rev together (both can be at the read start). Edit the rev column to
   match your oligos.
 * **Sample sheet**: `sample,plate,well` as usual; the AB barcode comes from the plate map, so no `ont-barcode` column is needed.
-* `--single-end` needs every tag (fwd and rev) to name one sample per AB bin. Reads keep their sequenced orientation; the
+* `--single-end` needs every tag (fwd and rev) to name only one sample per AB bin. Reads keep their sequenced orientation; the
   optional `--flip` (off by default) turns reads that start with the rev tag into forward-primer orientation.
-* Real reads (`demo/mab`, AB19 bin): 84% carry a readable utag at the read start; ~0.2% of those hit a tag from another plate.
-  Simulation: `python3 simulate-reads.py mab 6000 sim.fastq`. Raise `--min-score-diff` for fewer wrong calls.
+  
 
 Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags, plate map and sample sheet), `context`.
 
@@ -130,15 +127,29 @@ Other subcommands: `queries` (write the query FASTAs only), `tagqc` (check tags,
 | `--plates` | `data/utags-platemap.csv` | `plate,well,utag-fwd,utag-rev` | `1,A1,U013,U001` |
 | `--samplesheet` | none | `sample,plate,well[,ont-barcode]`, csv or `.xlsx` | `Soil_A,1,A1` |
 
-You only write the sample sheet: which sample is in which well. The plate map (found next to the script) turns wells into tags.
+The tag file and the plate map describe the oligos you have, not the run. The tag file is just the sequence of each tag
+ID. The plate map says which two tags (fwd and rev) were put into each well of the oligo plates, so it is the layout of the
+whole library: 4 plates, 384 wells. Both come with the repo and you only change them if your oligos or their layout are
+different.
+
+The sample sheet is the part that changes from run to run. It says which of your samples went into which well, for example
+`Soil_A,1,A1`. The script looks up plate 1 well A1 in the plate map, finds `U013` + `U001`, takes their sequences from the tag
+file, and writes every read with that tag pair to `samples/Soil_A.fastq`. If you already know the tags of a sample you can
+skip the plate map and write them directly (`sample,utag-fwd,utag-rev`).
+
+Without a sample sheet every well in the plate map is treated as a sample and the files are named after the well
+(`Plate1-A1.fastq`). With a sample sheet only your samples are written. The plate map is still read in that case: the tags of
+the wells you did not list are searched as decoys, so reads from those wells end up in `unexpected.tsv` instead of in one of
+your samples. For samples given by their tags, `summary.tsv` also looks up their plate and well in the plate map.
 
 **Tags** (`--tags`): 96 tags of 9 nt (`U001`-`U096`), 5'->3' as in the oligo. Only tags used by the plate map / sample sheet go into
 the queries (`--all-tags` uses all). Every tag ID you reference must exist here. Check your setup with `tagqc`: tag edit distances, the plate map's layout per plate (which tags run along rows / columns),
 duplicate wells, missing tag sequences, and with `--samplesheet` the samples per plate, ONT bins and decoys.
 
 **Plate map** (`--plates`): the full library design, 4 plates x 96 wells. Column 1-12 = rev tags `U001`-`U012`; rows A-H = fwd tags
-`U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U023` + `U007`). Without a sample sheet the outputs are named `Plate1-A1.fastq` etc.
-Without a sample sheet every well is a sample. You don't edit or pass it unless your physical tag layout differs.
+`U013`-`U020` on plate 1, `U021`-`U028` on plate 2, `U029`-`U036` on plate 3, `U037`-`U044` on plate 4 (so plate 2 well C7 = `U023` + `U007`).
+You don't edit or pass it unless your physical tag layout differs. A plate map may add an `ont-barcode` column (the ONT/AB
+barcode of each well, as in `data/mab-udi-platemap.csv`); a sample sheet with `plate,well` then inherits it.
 
 **Sample sheet** (`--samplesheet`): your sample names and their plates and wells.
 
