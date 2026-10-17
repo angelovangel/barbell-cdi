@@ -15,7 +15,7 @@ Input (tab or comma separated; extra columns are ignored):
     reads         read count
     plate, well   where the sample sits (written by barbell-cdi.py, also for custom sample names)
     ont_barcode   optional (twopass): every ONT bin gets its own plates
-    utag_fwd, utag_rev   optional, shown in the tooltip
+    utag_fwd, utag_rev   optional, shown in the tooltip and as well labels (utags)
 
 Without plate/well columns, samples are placed by their name (Plate1-A1, P2_B12, A1) or with --map, a CSV/TSV with
 columns `sample,well` and optionally `plate` (well like A1 or A01). Anything still unplaced is shown in an
@@ -223,6 +223,7 @@ main{grid-area:main;overflow:auto;padding:16px 20px 40px}
 .tiles{display:flex;flex-wrap:wrap;gap:6px}
 .well.tile{aspect-ratio:auto;border-radius:9px;padding:6px 10px;flex-direction:column;gap:2px;font-size:12px;min-width:92px}
 .tile .tn{font-weight:500;opacity:.85;font-size:11px;word-break:break-all}.tile .tv{font-weight:700}
+.well .ut{font-size:.74em;font-weight:500;line-height:1.1}
 aside{grid-area:side;border-left:1px solid var(--line);background:var(--panel);overflow:auto;padding:14px 16px 30px}
 aside h2{margin:14px 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);font-weight:600}
 aside h2:first-child{margin-top:0}
@@ -267,7 +268,7 @@ dt{color:var(--dim)}dd{margin:0;text-align:right;font-variant-numeric:tabular-nu
     <div class="controls">
       <label>colour scale <select id="scale"><option value="log">log</option><option value="sqrt">sqrt</option><option value="linear">linear</option></select></label>
       <label>range <select id="range"><option value="global">all plates</option><option value="plate">per plate</option></select></label>
-      <label>well labels <select id="labels"><option value="compact">compact</option><option value="exact">exact</option><option value="none">none</option></select></label>
+      <label>well labels <select id="labels"><option value="compact">compact</option><option value="exact">exact</option><option value="utags">utags</option><option value="none">none</option></select></label>
       <div class="legend"><span class="zero" title="0 reads"></span><span>0</span><span id="lo"></span><div class="bar" id="bar"></div><span id="hi"></span></div>
     </div>
   </header>
@@ -327,6 +328,7 @@ function colorFor(w) {
   return {bg: rgb(c), fg: (0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2]) > 140 ? '#111' : '#fff'};
 }
 const label = w => state.labels === 'none' ? '' : state.labels === 'exact' ? fmt(w.reads) : compact(w.reads);
+const utags = (w, sep) => [w.fwd, w.rev].filter(Boolean).map(esc).join(sep);
 
 // ---------- build plates
 function panelHTML(p) {
@@ -354,7 +356,8 @@ $('#plates').innerHTML = panels.map(panelHTML).join('');
 function decorate(el) {
   const w = byId.get(el.dataset.id), c = colorFor(w), g = state.groups[w.id];
   el.style.background = c.bg; el.style.color = c.fg;
-  if (el.classList.contains('tile')) el.innerHTML = `<span class="tn">${esc(w.sample)}</span><span class="tv">${state.labels === 'exact' || state.labels === 'none' ? fmt(w.reads) : compact(w.reads)}</span>`;
+  if (el.classList.contains('tile')) el.innerHTML = `<span class="tn">${esc(w.sample)}</span><span class="tv">${state.labels === 'utags' ? utags(w, '/') : state.labels === 'exact' || state.labels === 'none' ? fmt(w.reads) : compact(w.reads)}</span>`;
+  else if (state.labels === 'utags') el.innerHTML = `<span class="ut">${utags(w, '<br>')}</span>`;
   else el.textContent = label(w);
   el.classList.toggle('selA', g === 'A'); el.classList.toggle('selB', g === 'B');
   if (g) el.dataset.g = g; else delete el.dataset.g;
